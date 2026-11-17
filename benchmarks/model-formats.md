@@ -66,6 +66,19 @@
 
 真机结论与 Mac 一致且更明显：**FP16 在 CPU 上是“省内存/磁盘”选项，不是提速选项**；W82 上建议保持 FP32。质量方面 FP16 多生成 3 帧（4.30s vs 4.06s），采样路径对数值扰动敏感（同精度跨设备波形相关也≈0），需要人工听感验证后才能下质量结论。完整冷/热数据见 `benchmarks/w82-eink.md`。
 
+## INT8 动态量化（2026-11-17，Mac 先行验证，Android 待设备恢复）
+
+用 `onnxruntime.quantization.quantize_dynamic`（QInt8）。**先做预处理（`quant_pre_process`，需要 sympy）再量化**，否则 depth 的 692 个 MatMul 只能覆盖 52 个；预处理后 542 个。codec 的符号形状推断不完整，需 `skip_symbolic_shape=True`。
+
+| 组合 | backbone | depth | codec | 体积 | Mac RTF | EOS/时长 | 结论 |
+|---|---|---|---|---|---|---|---|
+| 全量 INT8 | INT8 | INT8 | INT8 | — | 0.51→0.38 | **不停机**（放宽到 200 帧生成 15.9s） | 不可用 |
+| 仅 backbone（B） | INT8 | FP32 | FP32 | — | 0.70 | 时长翻倍 8.14s | 不可用 |
+| 仅 depth（A） | FP32 | INT8 | FP32 | ~940MB | **0.51** | 正常 EOS，4.14s 与 FP32 一致 | 可用 |
+| **depth+codec（C）** | FP32 | INT8 | INT8 | **693MB** | **0.456** | 正常 EOS，4.14s；与 A 波形相关 0.962 | **候选** |
+
+Mac 对照基线 FP32：RTF 0.755、首块 681ms。组合 C：RTF 0.456（**提速 1.65×**）。质量证据：时长/EOS 与 FP32 一致、RMS 相当；但与 FP32 波形相关≈0（采样路径对扰动极敏感，跨精度本就如此），**最终需人工听感**。Android 包已按组合 C 组装（`outputs/android_model_int8`，693MB），待 W82 恢复 adb 后实测。
+
 ## 相关文件
 
 - 华为 P40 Pro：`benchmarks/huawei-p40-pro.md`
