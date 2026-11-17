@@ -54,26 +54,33 @@ android/
 
 | 指标 | 含义 |
 |---|---|
-| 首块延迟 | 引擎开始处理 → 第一块可播放 PCM 就绪（含参考音色 prime、首 4 帧生成与解码） |
+| 首块延迟 | 引擎开始处理 → 第一块可播放 PCM 就绪（含参考音色快照恢复、首块生成与解码） |
 | 生成耗时 | 纯生成/解码耗时，**不含** AudioTrack 写入阻塞 |
 | 音频时长 | 本次生成的 24 kHz 单声道音频长度 |
 | RTF | 生成耗时 ÷ 音频时长，越小越快 |
 | 实时倍数 | 音频时长 ÷ 生成耗时，>1 表示生成快于播放 |
+| 欠载 / 缓冲 | AudioTrack 欠载次数与缓冲长度；RTF>1 时供数不足会欠载 |
 | 峰值内存 | 生成期间采样的 PSS 峰值 |
+| CPU 均 | 进程 CPU 时间 ÷ 请求墙钟（多核可超过 100%） |
 
 同时每请求向 logcat 打一行结构化汇总，便于脱离界面核对：
 
 ```bash
 adb logcat -s M5Perf
 # [M5_LOAD] threads=4 load_ms=...
+# [M5_PREPARE] voice_ms=... ref_frames=...
+# [M5_PRIME] prime_ms=... source=snapshot|compute
 # [M5_TTFA] first_chunk_ms=...
-# [M5_SEG] index=1/2 frames=... audio_ms=... gen_ms=... rtf=...
-# [M5_PERF] lang=Chinese threads=4 chars=... segments=... audio_ms=... gen_ms=... wall_ms=... rtf=... realtime=... first_chunk_ms=... load_ms=... peak_pss_mib=... streaming=true tn=true
+# [M5_SEG] index=1/2 frames=... audio_ms=... gen_ms=... llm_ms=... codec_ms=... rtf=...
+# [M5_PERF] device=... lang=Chinese threads=4 chars=... segments=... audio_ms=... gen_ms=... wall_ms=... rtf=... realtime=... first_chunk_ms=... load_ms=... prepare_ms=... peak_pss_mib=... underruns=... buffer_ms=... cpu_pct=... streaming=true tn=true
 ```
 
 - `gen_ms` 扣除了 `AudioTrack.write` 的阻塞时间，`wall_ms` 是请求总墙钟；手机生成慢、播放缓冲满时两者会拉开差距；
+- `llm_ms` / `codec_ms` 把生成阶段拆成语言模型与声音解码器两块，调优时先看哪块占大头；
 - 若设备不支持 24 kHz `AudioTrack`，会自动退回整段生成（`streaming=false`，首块延迟显示「未流式」）；
 - TN 目前只覆盖中文/英文；选日/韩/德/法时自动跳过 TN，原文直接送模型。
+
+**实测数据按设备分开**：[华为 P40 Pro（Kirin 990）](../benchmarks/huawei-p40-pro.md) · [W82 墨水屏平板（RK3566）](../benchmarks/w82-eink.md)。同一份 APK/模型，P40 Pro 热态首块 427ms、RTF 2.04；W82 为 2169ms、RTF 11.1——W82 的 4×A55 算力不足以实时合成，不要跨设备引用同一组数字。
 
 ## 1. 构建环境
 

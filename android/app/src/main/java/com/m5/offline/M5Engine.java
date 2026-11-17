@@ -20,7 +20,9 @@ public final class M5Engine implements AutoCloseable {
     public static final List<String> LANGUAGES = Collections.unmodifiableList(
         Arrays.asList("Chinese", "English", "German", "French", "Japanese", "Korean"));
     private static final int TAIL_SAMPLES = 2400; // 100 ms，段尾修剪
-    private static final int CHUNK_FRAMES = 4;    // 首块 4 帧 ≈ 320 ms 音频
+    private static final int FIRST_CHUNK_FRAMES = 1; // 首块 1 帧 ≈ 80 ms 音频，压低 TTFA
+    private static final int CHUNK_FRAMES = 8;       // 之后 8 帧一块，减少解码调用次数
+    private static final int PRIME_CHUNK_FRAMES = 32;
 
     public static final class Voice {
         public final String name, referenceText;
@@ -66,6 +68,7 @@ public final class M5Engine implements AutoCloseable {
     private Tokenizer tokenizer;
     private JSONObject meta, codecMeta;
     private final List<Voice> voices = new ArrayList<>();
+    private final Map<String, DecoderSnapshot> decoderSnapshots = new HashMap<>();
 
     public M5Engine(File root, int threads, Progress progress) throws Exception {
         if (threads < 1 || threads > 8) throw new IllegalArgumentException("线程数需要为 1–8");
@@ -105,6 +108,28 @@ public final class M5Engine implements AutoCloseable {
     }
 
     public List<Voice> voices() { return Collections.unmodifiableList(voices); }
+    private static String voiceKey(Voice voice) {
+        return voice.name + '\n' + voice.referenceText + '\n' + Arrays.deepHashCode(voice.codes);
+    }
+    /** 把参考音色的解码器状态预先 prime 并缓存；之后每段/每请求直接恢复。 */
+    public void prepareVoice(Voice voice, Progress progress) throws Exception {
+        if (voice == null) throw new IllegalArgumentException("请选择音色");
+        String key = voiceKey(voice);
+        if (decoderSnapshots.containsKey(key)) return;
+        progress.update("正在预热音色…");
+        long start = System.nanoTime();
+        try (CodecState state = new CodecState(null)) {
+            for (int offset = 0; offset < voice.codes.length; offset += PRIME_CHUNK_FRAMES) {
+                state.run(voice.codes, offset, Math.min(PRIME_CHUNK_FRAMES, voice.codes.length - offset));
+            }
+            decoderSnapshots.put(key, snapshot(state, voice.codes.length));
+        }
+        Log.i("M5Perf", String.format(Locale.ROOT,
+            "[M5_PREPARE] voice_ms=%.0f ref_frames=%d", (System.nanoTime() - start) / 1e6, voice.codes.length));
+    }
+    public boolean isVoicePrepared(Voice voice) {
+        return voice != null && decoderSnapshots.containsKey(voiceKey(voice));
+    }
     public static JSONObject json(File path) throws IOException, JSONException {
         return new JSONObject(new String(Files.readAllBytes(path.toPath()), java.nio.charset.StandardCharsets.UTF_8));
     }
@@ -170,7 +195,7 @@ public final class M5Engine implements AutoCloseable {
                 double segAudioStart = wav.duration();
                 if (sink != null) {
                     try (StreamingDecoder decoder = new StreamingDecoder(
-                            voice.codes, wav, sink, cancelled, start)) {
+                            voice, wav, sink, cancelled, start)) {
                         long[][] generated = generate(segments.get(i), voice, language, cancelled,
                             message -> progress.update(prefix + message), noiseSource, decoder);
                         decoder.finish();
@@ -178,7 +203,7 @@ public final class M5Engine implements AutoCloseable {
                         sinkNanos += decoder.sinkNanos();
                         if (firstChunk < 0 && decoder.firstChunkSeconds() >= 0) firstChunk = decoder.firstChunkSeconds();
                         logSegment(i, segments.size(), generated.length, segStart, segAudioStart, wav,
-                            decoder.sinkNanos());
+                            decoder.sinkNanos(), decoder.decodeNanos());
                     }
                 } else {
                     long[][] generated = generate(segments.get(i), voice, language, cancelled,
@@ -186,7 +211,7 @@ public final class M5Engine implements AutoCloseable {
                     progress.update(prefix + "正在转换成声音…");
                     decode(voice.codes, generated, wav, cancelled);
                     framesTotal += generated.length;
-                    logSegment(i, segments.size(), generated.length, segStart, segAudioStart, wav, 0);
+                    logSegment(i, segments.size(), generated.length, segStart, segAudioStart, wav, 0, 0);
                 }
             }
             duration = wav.duration();
@@ -202,18 +227,24 @@ public final class M5Engine implements AutoCloseable {
     }
 
     private void logSegment(int index, int total, int frames, long segStart, double audioStart,
-                            WavWriter wav, long sinkNanos) {
+                            WavWriter wav, long sinkNanos, long decodeNanos) {
         double gen = (System.nanoTime() - segStart - sinkNanos) / 1e9;
         double audio = wav.duration() - audioStart;
+        double llm = Math.max(0, gen - decodeNanos / 1e9);
         Log.i("M5Perf", String.format(Locale.ROOT,
-            "[M5_SEG] index=%d/%d frames=%d audio_ms=%.0f gen_ms=%.0f rtf=%.3f",
-            index + 1, total, frames, audio * 1000, gen * 1000, audio > 0 ? gen / audio : 0));
+            "[M5_SEG] index=%d/%d frames=%d audio_ms=%.0f gen_ms=%.0f llm_ms=%.0f codec_ms=%.0f rtf=%.3f",
+            index + 1, total, frames, audio * 1000, gen * 1000, llm * 1000, decodeNanos / 1e6,
+            audio > 0 ? gen / audio : 0));
     }
 
     private long[][] generate(String text, Voice voice, String language, AtomicBoolean cancelled,
                               Progress progress, NoiseSource source, FrameSink sink) throws Exception {
+        long genStart = System.nanoTime();
         long[] ids = tokenizer.encode(conditioned(voice.referenceText, text, language));
         int maxFrames = 500, length = ids.length + voice.codes.length;
+        Log.i("M5Perf", String.format(Locale.ROOT,
+            "[M5_TOKENIZE] ids=%d ref_frames=%d prefix=%d tokenize_ms=%.1f",
+            ids.length, voice.codes.length, length, (System.nanoTime() - genStart) / 1e6));
         if (length + maxFrames > meta.getInt("max_sequence")) throw new IOException("文本或参考音色过长，请缩短后重试");
         FloatBuffer prefix = floats(length * 512);
         for (long id : ids) textEmbedding.copyRow((int) id, prefix);
@@ -239,6 +270,9 @@ public final class M5Engine implements AutoCloseable {
                     feed.put("past", previousBackbone == null ? initialPast : tensor(previousBackbone, "present"));
                     feed.put("positions", position);
                     OrtSession.Result next = backbone.run(feed);
+                    if (step == 0) Log.i("M5Perf", String.format(Locale.ROOT,
+                        "[M5_PREFILL] prefill_ms=%.1f positions=%d",
+                        (System.nanoTime() - genStart) / 1e6, positions.length));
                     if (previousBackbone != null) previousBackbone.close(); previousBackbone = next;
                 }
                 if (previousDepth != null) { previousDepth.close(); previousDepth = null; }
@@ -249,6 +283,9 @@ public final class M5Engine implements AutoCloseable {
                     feed.put("noise", noiseTensor); feed.put("allow_eos", allowEos);
                     previousDepth = depth.run(feed);
                 }
+                if (step == 0) Log.i("M5Perf", String.format(Locale.ROOT,
+                    "[M5_FIRST_FRAME] first_frame_ms=%.1f",
+                    (System.nanoTime() - genStart) / 1e6));
                 LongBuffer codes = tensor(previousDepth, "codes").getLongBuffer();
                 long[] frame = new long[16]; boolean eos = true;
                 for (int j = 0; j < 16; j++) { long v = codes.get(j); eos &= v == 0; frame[j] = Math.max(0, Math.min(2047, v - 1)); }
@@ -276,34 +313,54 @@ public final class M5Engine implements AutoCloseable {
         private final long startNanos;
         private final List<long[]> buffered = new ArrayList<>();
         private float[] pending = new float[16384];
-        private int pendingCount;
-        private long sinkNanos;
+        private int pendingCount, chunkTarget = FIRST_CHUNK_FRAMES;
+        private long sinkNanos, decodeNanos;
+        private boolean firstDecodeLogged;
         private double firstChunkSeconds = -1;
         private boolean closed;
 
-        StreamingDecoder(long[][] reference, WavWriter wav, AudioSink sink,
+        StreamingDecoder(Voice voice, WavWriter wav, AudioSink sink,
                          AtomicBoolean cancelled, long startNanos) throws Exception {
             this.wav = wav; this.sink = sink; this.cancelled = cancelled; this.startNanos = startNanos;
-            state = new CodecState();
+            long[][] reference = voice.codes;
+            String key = voiceKey(voice);
+            DecoderSnapshot cached = decoderSnapshots.get(key);
+            long primeStart = System.nanoTime();
+            state = new CodecState(cached);
             try {
-                for (int start = 0; start < reference.length; start += 16) {
-                    check(cancelled);
-                    state.run(reference, start, Math.min(16, reference.length - start));
+                if (cached == null) {
+                    for (int start = 0; start < reference.length; start += PRIME_CHUNK_FRAMES) {
+                        check(cancelled);
+                        state.run(reference, start, Math.min(PRIME_CHUNK_FRAMES, reference.length - start));
+                    }
+                    decoderSnapshots.put(key, snapshot(state, reference.length));
                 }
             } catch (Exception e) { state.close(); throw e; }
+            Log.i("M5Perf", String.format(Locale.ROOT,
+                "[M5_PRIME] prime_ms=%.0f ref_frames=%d source=%s",
+                (System.nanoTime() - primeStart) / 1e6, reference.length, cached == null ? "compute" : "snapshot"));
         }
 
         public void onFrame(long[] frame, int index) throws Exception {
             check(cancelled);
             buffered.add(frame);
-            if (buffered.size() >= CHUNK_FRAMES) flushChunk();
+            if (buffered.size() >= chunkTarget) flushChunk();
         }
 
         private void flushChunk() throws Exception {
             if (buffered.isEmpty()) return;
             long[][] chunk = buffered.toArray(new long[0][]);
             buffered.clear();
+            long decodeStart = System.nanoTime();
             FloatBuffer pcm = state.run(chunk, 0, chunk.length);
+            long decodeMs = System.nanoTime() - decodeStart;
+            decodeNanos += decodeMs;
+            if (!firstDecodeLogged) {
+                firstDecodeLogged = true;
+                chunkTarget = CHUNK_FRAMES;
+                Log.i("M5Perf", String.format(Locale.ROOT,
+                    "[M5_DEC_FIRST] decode_ms=%.1f frames=%d", decodeMs / 1e6, chunk.length));
+            }
             int count = pcm.remaining();
             if (pendingCount + count > pending.length)
                 pending = Arrays.copyOf(pending, Math.max(pending.length * 2, pendingCount + count));
@@ -313,9 +370,23 @@ public final class M5Engine implements AutoCloseable {
         }
 
         private void emitAvailable() throws Exception {
+            if (firstChunkSeconds < 0) {
+                // 首块只有 1 帧（1920 样本）时不够 2400 的保留阈值：直接整块发出，
+                // 后续仍按“保留末尾 2400 样本”推进；总量仍是 total-2400。
+                if (pendingCount >= 1920) {
+                    firstChunkSeconds = (System.nanoTime() - startNanos) / 1e9;
+                    if (sink != null) {
+                        long t0 = System.nanoTime();
+                        sink.write(pending, 0, pendingCount);
+                        sinkNanos += System.nanoTime() - t0;
+                    }
+                    wav.append(FloatBuffer.wrap(pending, 0, pendingCount), pendingCount);
+                    pendingCount = 0;
+                }
+                return;
+            }
             int emit = pendingCount - TAIL_SAMPLES;
             if (emit <= 0) return;
-            if (firstChunkSeconds < 0) firstChunkSeconds = (System.nanoTime() - startNanos) / 1e9;
             if (sink != null) {
                 long t0 = System.nanoTime();
                 sink.write(pending, 0, emit);
@@ -336,6 +407,7 @@ public final class M5Engine implements AutoCloseable {
         }
 
         long sinkNanos() { return sinkNanos; }
+        long decodeNanos() { return decodeNanos; }
         double firstChunkSeconds() { return firstChunkSeconds; }
         public void close() {
             if (closed) return; closed = true;
@@ -344,7 +416,7 @@ public final class M5Engine implements AutoCloseable {
     }
 
     private void decode(long[][] reference, long[][] generated, WavWriter wav, AtomicBoolean cancelled) throws Exception {
-        try (CodecState state = new CodecState()) {
+        try (CodecState state = new CodecState(null)) {
             for (int start = 0; start < reference.length; start += 16) {
                 check(cancelled); state.run(reference, start, Math.min(16, reference.length - start));
             }
@@ -361,9 +433,12 @@ public final class M5Engine implements AutoCloseable {
 
     private final class CodecState implements AutoCloseable {
         private final List<OnnxTensor> initial = new ArrayList<>();
+        private final Map<String, OnnxTensor> restored;
         private OrtSession.Result previous;
         private int offset;
-        CodecState() throws Exception {
+        CodecState(DecoderSnapshot snapshot) throws Exception {
+            restored = snapshot == null ? null : snapshot.states;
+            offset = snapshot == null ? 0 : snapshot.frames;
             try {
                 initial.add(zeros(new long[]{8, 2, 1, 16, 0, 64}));
                 JSONArray states = codecMeta.getJSONArray("states");
@@ -381,15 +456,48 @@ public final class M5Engine implements AutoCloseable {
                  OnnxTensor position = longs(new long[]{offset}, new long[]{1})) {
                 Map<String, OnnxTensor> feed = new HashMap<>();
                 feed.put("codes", codes); feed.put("offset", position);
-                feed.put("past", previous == null ? initial.get(0) : tensor(previous, "present"));
+                feed.put("past", previous == null ? stateTensor("present", 0) : tensor(previous, "present"));
                 for (int i = 1; i < initial.size(); i++)
-                    feed.put("conv_" + (i - 1), previous == null ? initial.get(i) : tensor(previous, "next_conv_" + (i - 1)));
+                    feed.put("conv_" + (i - 1), previous == null
+                        ? stateTensor("next_conv_" + (i - 1), i)
+                        : tensor(previous, "next_conv_" + (i - 1)));
                 OrtSession.Result next = codec.run(feed);
                 if (previous != null) previous.close(); previous = next; offset += count;
                 return tensor(previous, "audio").getFloatBuffer();
             }
         }
+        private OnnxTensor stateTensor(String name, int initialIndex) {
+            return restored != null ? restored.get(name) : initial.get(initialIndex);
+        }
         public void close() { if (previous != null) previous.close(); for (OnnxTensor t : initial) t.close(); }
+    }
+
+    private final class DecoderSnapshot {
+        final Map<String, OnnxTensor> states;
+        final int frames;
+        DecoderSnapshot(Map<String, OnnxTensor> states, int frames) { this.states = states; this.frames = frames; }
+        void close() { for (OnnxTensor tensor : states.values()) try { tensor.close(); } catch (Exception ignored) { } }
+    }
+
+    private DecoderSnapshot snapshot(CodecState state, int frames) throws Exception {
+        Map<String, OnnxTensor> copy = new LinkedHashMap<>();
+        for (String name : codecStateNames()) {
+            OnnxTensor source = tensor(state.previous, name);
+            FloatBuffer values = source.getFloatBuffer();
+            int count = values.remaining();
+            FloatBuffer target = ByteBuffer.allocateDirect(count * 4).order(ByteOrder.nativeOrder()).asFloatBuffer();
+            target.put(values); target.rewind();
+            copy.put(name, OnnxTensor.createTensor(env, target, source.getInfo().getShape()));
+        }
+        return new DecoderSnapshot(copy, frames);
+    }
+
+    private List<String> codecStateNames() throws JSONException {
+        List<String> names = new ArrayList<>();
+        names.add("present");
+        JSONArray states = codecMeta.getJSONArray("states");
+        for (int i = 0; i < states.length(); i++) names.add("next_conv_" + i);
+        return names;
     }
 
     private static OnnxTensor tensor(OrtSession.Result result, String name) throws IOException {
@@ -423,6 +531,8 @@ public final class M5Engine implements AutoCloseable {
         if (result.isEmpty()) throw new IllegalArgumentException("请输入有效文字"); return result;
     }
     public void close() {
+        for (DecoderSnapshot snapshot : decoderSnapshots.values()) snapshot.close();
+        decoderSnapshots.clear();
         for (OrtSession session : new OrtSession[]{codec, depth, backbone})
             if (session != null) try { session.close(); } catch (OrtException ignored) { }
         for (NpyMatrix matrix : new NpyMatrix[]{textEmbedding, audioEmbedding})

@@ -50,6 +50,7 @@ public final class MainActivity extends Activity {
     private int loadedThreads;
     private MediaPlayer player;
     private AudioTrack audioTrack;
+    private int bufferMs, underruns;
     private long lastPssSample;
     private long peakPssKb;
     private File modelRoot, audioFile, voiceRoot;
@@ -453,7 +454,8 @@ public final class MainActivity extends Activity {
         releasePlayer(); begin(); result.setText(""); perf.setText("生成中…");
         worker.execute(() -> {
             File pending = new File(getFilesDir(), "m5-generating.wav");
-            double loadMs = 0;
+            long cpuStart = android.os.Process.getElapsedCpuTime();
+            double loadMs = 0, prepareMs = 0;
             boolean streaming = false;
             try {
                 synchronized (diagnostics) {
@@ -472,6 +474,12 @@ public final class MainActivity extends Activity {
                     loadMs = (System.nanoTime() - loadStart) / 1e6;
                 }
                 synchronized (diagnostics) { diagnostics.put("load_ms", loadMs); }
+                if (!engine.isVoicePrepared(voice.voice)) {
+                    long prepareStart = System.nanoTime();
+                    engine.prepareVoice(voice.voice, this::updateStatus);
+                    prepareMs = (System.nanoTime() - prepareStart) / 1e6;
+                }
+                synchronized (diagnostics) { diagnostics.put("prepare_ms", prepareMs); }
                 streaming = startAudioTrack();
                 final boolean stream = streaming;
                 synchronized (diagnostics) { diagnostics.put("streaming", stream); }
@@ -486,7 +494,10 @@ public final class MainActivity extends Activity {
                 final double rtf = audioMs > 0 ? genMs / audioMs : 0;
                 final double realtime = genMs > 0 ? audioMs / genMs : 0;
                 final double peakMiB = peakPssKb / 1024.0;
+                final long cpuMs = android.os.Process.getElapsedCpuTime() - cpuStart;
+                final double cpuPct = synthesis.wallSeconds > 0 ? cpuMs / (synthesis.wallSeconds * 1000) * 100 : 0;
                 final double load = loadMs;
+                final double prepare = prepareMs;
                 synchronized (diagnostics) {
                     diagnostics.put("elapsed_s", synthesis.elapsedSeconds); diagnostics.put("wall_s", synthesis.wallSeconds);
                     diagnostics.put("audio_s", synthesis.audioSeconds); diagnostics.put("rtf", rtf);
@@ -495,20 +506,24 @@ public final class MainActivity extends Activity {
                     diagnostics.put("peak_pss_mib", peakMiB);
                 }
                 android.util.Log.i("M5Perf", String.format(Locale.ROOT,
-                    "[M5_PERF] lang=%s threads=%d chars=%d segments=%d audio_ms=%.0f gen_ms=%.0f wall_ms=%.0f " +
-                    "rtf=%.3f realtime=%.2f first_chunk_ms=%.0f load_ms=%.0f peak_pss_mib=%.0f streaming=%s tn=%s",
-                    lang, threadCount, chars, synthesis.segments, audioMs, genMs, synthesis.wallSeconds * 1000,
-                    rtf, realtime, synthesis.firstChunkSeconds * 1000, load, peakMiB, stream, useTn));
+                    "[M5_PERF] device=%s lang=%s threads=%d chars=%d segments=%d audio_ms=%.0f gen_ms=%.0f wall_ms=%.0f " +
+                    "rtf=%.3f realtime=%.2f first_chunk_ms=%.0f load_ms=%.0f prepare_ms=%.0f peak_pss_mib=%.0f " +
+                    "underruns=%d buffer_ms=%d cpu_pct=%.0f streaming=%s tn=%s",
+                    Build.MODEL, lang, threadCount, chars, synthesis.segments, audioMs, genMs, synthesis.wallSeconds * 1000,
+                    rtf, realtime, synthesis.firstChunkSeconds * 1000, load, prepareMs, peakMiB, underruns, bufferMs,
+                    cpuPct, stream, useTn));
                 ui(() -> {
                     result.setText(String.format(Locale.CHINA, "语音 %.1f 秒 · 生成 %.1f 秒 · 实时 %.2f×",
                         synthesis.audioSeconds, synthesis.elapsedSeconds, realtime));
                     perf.setText(String.format(Locale.CHINA,
-                        "首块延迟  %s\n生成耗时  %.2f s · 音频 %.2f s\nRTF %.3f · 实时 %.2f×\n峰值内存  %.0f MiB · %d 线程 · %s%s",
+                        "首块延迟  %s\n生成耗时  %.2f s · 音频 %.2f s\nRTF %.3f · 实时 %.2f×\n欠载 %d 次 · 缓冲 %d ms\n峰值内存  %.0f MiB · CPU 均 %.0f%% · %d 线程 · %s%s",
                         synthesis.firstChunkSeconds >= 0
                             ? String.format(Locale.CHINA, "%.0f ms", synthesis.firstChunkSeconds * 1000)
                             : "—（未流式）",
-                        synthesis.elapsedSeconds, synthesis.audioSeconds, rtf, realtime, peakMiB, threadCount, lang,
-                        load > 0 ? String.format(Locale.CHINA, "\n模型加载  %.0f ms（本次首次加载）", load) : ""));
+                        synthesis.elapsedSeconds, synthesis.audioSeconds, rtf, realtime, underruns, bufferMs,
+                        peakMiB, cpuPct, threadCount, lang,
+                        (load > 0 ? String.format(Locale.CHINA, "\n模型加载  %.0f ms（本次首次加载）", load) : "")
+                            + (prepare > 0 ? String.format(Locale.CHINA, "\n音色预热  %.0f ms（本次首次）", prepare) : "")));
                     status.setText(stream ? "生成完成，已边生成边播放；可回放或保存。" : "生成完成，可以播放或保存。");
                 });
             } catch (Exception | OutOfMemoryError e) { stopAudioTrack(true); failure(e); closeEngine(); System.gc(); }
@@ -546,8 +561,9 @@ public final class MainActivity extends Activity {
                 .setBufferSizeInBytes(bytes)
                 .setTransferMode(AudioTrack.MODE_STREAM).build();
             if (audioTrack.getState() != AudioTrack.STATE_INITIALIZED) throw new IOException("AudioTrack 初始化失败");
+            bufferMs = bytes / 48; underruns = 0;
             audioTrack.play();
-            android.util.Log.i("M5Perf", "[M5_AUDIO] track=on buffer_ms=" + bytes / 48);
+            android.util.Log.i("M5Perf", "[M5_AUDIO] track=on buffer_ms=" + bufferMs);
             return true;
         } catch (Exception e) {
             android.util.Log.w("M5Perf", "[M5_AUDIO] track=off " + e);
@@ -570,6 +586,8 @@ public final class MainActivity extends Activity {
         AudioTrack track = audioTrack;
         audioTrack = null;
         if (track == null) return;
+        try { underruns = track.getUnderrunCount(); } catch (Exception ignored) { }
+        android.util.Log.i("M5Perf", "[M5_AUDIO] track=off underruns=" + underruns + " buffer_ms=" + bufferMs);
         try {
             if (discard) { track.pause(); track.flush(); }
             else track.stop();
