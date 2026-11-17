@@ -60,7 +60,7 @@ m5tts-run/
 
 其余构建事项：
 
-- **构建环境**：JDK 17、Android SDK 35、Gradle 8.9 / AGP 8.7.3（工程已固定）、ONNX Runtime Android 1.23.2（Maven 拉取）；`minSdk 28`，只打 `arm64-v8a`；
+- **构建环境**：JDK 17、Android SDK 35、Gradle 8.9 / AGP 8.7.3（工程已固定）、ONNX Runtime Android 1.32.0（Maven 拉取；FP16 模型需 ≥1.32）；`minSdk 28`，只打 `arm64-v8a`；
 - **构建**：`cd android && ./gradlew --no-daemon -Pm5VoiceEncoder=/绝对路径/codec_encoder.onnx :app:assembleDebug`；产物 `android/app/build/outputs/apk/debug/app-debug.apk`；
 - **模型不进 APK**：主 TTS 模型用 `package_model.py` 打成外置 `.m5model`，App 内导入；APK 只内置 182MB 的参考音频 encoder（构建时按固定 SHA256 校验）；
 - **上游 README 的跨目录引用**：`android/README.md` 提到的 `../README_zh.md`、`requirements.txt` 属于 M5-TTS 仓库根，本仓库没有，需要时去上游 clone 取；

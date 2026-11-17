@@ -20,7 +20,7 @@ android {
     packaging { jniLibs { useLegacyPackaging = false } }
 }
 
-dependencies { implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.23.2' }
+dependencies { implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.32.0' }
 
 def voiceEncoderSource = rootProject.file(
     providers.gradleProperty('m5VoiceEncoder')

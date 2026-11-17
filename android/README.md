@@ -92,7 +92,7 @@ adb logcat -s M5Perf
 | Java 源码级别 | 11 |
 | 手机系统 | Android 9+（minSdk 28） |
 | CPU ABI | 仅 `arm64-v8a` |
-| ONNX Runtime Android | 1.23.2，由 Maven 获取 |
+| ONNX Runtime Android | 1.32.0，由 Maven 获取（FP16 模型需 ≥1.32；1.23.2 加载 FP16 会报 GraphUtils 错） |
 | applicationId | `com.m5.offline` |
 
 设置 `JAVA_HOME`、`ANDROID_HOME`，或通过 Android Studio 打开本目录并配置本机 SDK。`local.properties` 只供本机使用，不要提交。构建不需要 PyTorch、CUDA 或自有 NDK 工程；首次获取 Gradle、AGP 和 Maven 依赖需要联网。
