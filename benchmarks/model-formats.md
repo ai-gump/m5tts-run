@@ -1,0 +1,42 @@
+# M5-TTS 权重大小与精度形态
+
+> 三个数字经常被混着说：**50M 参数**、**1.77GB ONNX 包**、**1.14GB Android 子集**。这里把口径拆开，并记录本次 FP16 实验的实际体积。
+
+## 一张表
+
+| 形态 | 包含内容 | 大小 | 精度 |
+|---|---|---|---|
+| 官方 HF ONNX 全量包 | `weights/` 12 个文件 | 1.77GB | FP32 |
+| Android 实际运行子集 | backbone 116MB + depth 267MB + codec_decoder_cached 435MB + text_embeddings 254MB + audio_embeddings 64MB + tokenizer 5.2MB | 约 1.14GB | FP32 |
+| audio.cpp GGUF | `m5-voiceclone-f16.gguf` | 954MB | LM 权重 F16，codec 仍 F32 |
+| **本次 FP16 ONNX（模型 FP16，embedding 仍 FP32）** | backbone 58MB + depth 134MB + codec 218MB + embeddings 318MB + tokenizer 5.2MB | **约 733MiB（753MB）** | 模型 FP16，I/O 保持 FP32；embedding FP32 |
+| **全 FP16 目标形态（embedding 也转 FP16，未实现）** | 模型 430MB + embedding 159MB + tokenizer 5.2MB | 约 594MB | 全 FP16 |
+
+## 为什么不是“50M 参数 = 50MB”
+
+- **50M 只是语言模型部分**：30M 时序骨干 + 20M 帧内 MTP 解码器；不含 codec、不含 embedding；
+- 文本 embedding：129,992 × 512 × 4B ≈ 254MB；
+- 音频 embedding：16 × 2051 × 512 × 4B ≈ 64MB；
+- codec decoder：约 435MB（FP32）；
+- GGUF 文件名里的 `f16` 只表示 **LM 权重 F16**，官方打包说明明确保留 F32 codec 权重（GGUF 元数据：“published native packages retain F32 codec weights”）。
+
+## 本次 FP16 ONNX 的做法
+
+- 用 `onnxruntime.transformers.float16.convert_float_to_float16(model, keep_io_types=True, disable_shape_infer=True)` 转换 `backbone.onnx`、`depth_frame.onnx`、`codec_decoder_cached.onnx`；
+- `keep_io_types=True` 让模型输入/输出仍是 FP32，Android Java 侧不用改 `FloatBuffer`/`OnnxTensor` 的喂法；图内部插 Cast 转 FP16；
+- embedding 仍用 FP32，第一轮对比先隔离“ONNX 模型精度”这一个变量；
+- 转换后体积：backbone 121.8→61.0MB、depth 280.0→140.6MB、codec 456.5→228.3MB；三张图合计约 430MB；
+- 转换告警：`Sin`/`Cos`/`Exp` 等节点在 CPU EP 没有 FP16 kernel，ORT 会在运行时插 Cast 或回退；这正是 FP16 在 CPU 上不一定更快的原因。
+
+## 预期与风险（待真机数据验证）
+
+- **体积/磁盘**：模型从 1.14GB 降到 753MB，若 embedding 也转 FP16 可到约 594MB；对存储紧张的设备有意义；
+- **速度**：ORT CPU EP 的 FP16 支持有限，Mac 本机单算子对比已经出现 **FP16 更慢**（backbone 0.94×、depth 0.69×、codec 0.96×，4 线程），Android 真机需要实测确认；
+- **内存**：FP16 权重映射减半，但运行时 Cast/回退可能把激活值又升回 FP32，峰值 PSS 不一定等比例下降；
+- **质量**：FP16 动态范围比 FP32 小，转换时已对极端值做截断（`-3.4e38 → -10000`、极小正值 → `1e-7`）；需要用同一文本做音频相关性/听感对比。
+
+## 相关文件
+
+- 华为 P40 Pro：`benchmarks/huawei-p40-pro.md`
+- W82 墨水屏：`benchmarks/w82-eink.md`
+- FP32/FP16 对比结果：待补（同一份 APK、同一段文本、同一台设备，只换模型目录）

@@ -3,7 +3,7 @@
 配套课程：[ai-gump-lessons](https://github.com/ai-gump/ai-gump-lessons) 的《M5-TTS 三端部署方案》
 （Apple M3 / macOS 15 / Metal + CPU 双后端的实机验证与优化记录）。
 
-**实测数据按设备分开记录**：[华为 P40 Pro（Kirin 990）](benchmarks/huawei-p40-pro.md) · [W82 墨水屏平板（RK3566）](benchmarks/w82-eink.md)。两套数据不要混用。
+**实测数据按设备分开记录**：[华为 P40 Pro（Kirin 990）](benchmarks/huawei-p40-pro.md) · [W82 墨水屏平板（RK3566）](benchmarks/w82-eink.md)；权重大小与 FP32/FP16 形态见 [model-formats](benchmarks/model-formats.md)。两套设备数据不要混用。
 
 **本仓库只放"轻资产"**：patch、自建 Web 测试台、测量脚本与说明。
 上游代码、模型权重、运行产物都在 `.gitignore` 里排除，按下文指引自行获取/重建。

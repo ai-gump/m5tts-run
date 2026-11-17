@@ -503,13 +503,13 @@ public final class MainActivity extends Activity {
                     diagnostics.put("audio_s", synthesis.audioSeconds); diagnostics.put("rtf", rtf);
                     diagnostics.put("realtime", realtime); diagnostics.put("segments", synthesis.segments);
                     diagnostics.put("frames", synthesis.frames); diagnostics.put("first_chunk_ms", synthesis.firstChunkSeconds * 1000);
-                    diagnostics.put("peak_pss_mib", peakMiB);
+                    diagnostics.put("peak_pss_mib", peakMiB); diagnostics.put("model_precision", engine.precision());
                 }
                 android.util.Log.i("M5Perf", String.format(Locale.ROOT,
-                    "[M5_PERF] device=%s lang=%s threads=%d chars=%d segments=%d audio_ms=%.0f gen_ms=%.0f wall_ms=%.0f " +
+                    "[M5_PERF] device=%s precision=%s lang=%s threads=%d chars=%d segments=%d audio_ms=%.0f gen_ms=%.0f wall_ms=%.0f " +
                     "rtf=%.3f realtime=%.2f first_chunk_ms=%.0f load_ms=%.0f prepare_ms=%.0f peak_pss_mib=%.0f " +
                     "underruns=%d buffer_ms=%d cpu_pct=%.0f streaming=%s tn=%s",
-                    Build.MODEL, lang, threadCount, chars, synthesis.segments, audioMs, genMs, synthesis.wallSeconds * 1000,
+                    Build.MODEL, engine.precision(), lang, threadCount, chars, synthesis.segments, audioMs, genMs, synthesis.wallSeconds * 1000,
                     rtf, realtime, synthesis.firstChunkSeconds * 1000, load, prepareMs, peakMiB, underruns, bufferMs,
                     cpuPct, stream, useTn));
                 ui(() -> {
@@ -521,7 +521,7 @@ public final class MainActivity extends Activity {
                             ? String.format(Locale.CHINA, "%.0f ms", synthesis.firstChunkSeconds * 1000)
                             : "—（未流式）",
                         synthesis.elapsedSeconds, synthesis.audioSeconds, rtf, realtime, underruns, bufferMs,
-                        peakMiB, cpuPct, threadCount, lang,
+                        peakMiB, cpuPct, threadCount, lang, engine.precision(),
                         (load > 0 ? String.format(Locale.CHINA, "\n模型加载  %.0f ms（本次首次加载）", load) : "")
                             + (prepare > 0 ? String.format(Locale.CHINA, "\n音色预热  %.0f ms（本次首次）", prepare) : "")));
                     status.setText(stream ? "生成完成，已边生成边播放；可回放或保存。" : "生成完成，可以播放或保存。");

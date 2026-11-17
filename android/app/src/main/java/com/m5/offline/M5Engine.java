@@ -67,6 +67,7 @@ public final class M5Engine implements AutoCloseable {
     private NpyMatrix textEmbedding, audioEmbedding;
     private Tokenizer tokenizer;
     private JSONObject meta, codecMeta;
+    private String precision = "fp32";
     private final List<Voice> voices = new ArrayList<>();
     private final Map<String, DecoderSnapshot> decoderSnapshots = new HashMap<>();
 
@@ -75,6 +76,7 @@ public final class M5Engine implements AutoCloseable {
         long loadStart = System.nanoTime();
         try {
             meta = json(new File(root, "manifest.json")); codecMeta = json(new File(root, "codec_cached.json"));
+            precision = meta.optString("precision", "fp32");
             if (!"m5-llama-rq16-qwen3-12hz".equals(meta.getString("architecture")) ||
                 meta.getInt("layers") != 8 || meta.getInt("kv_heads") != 2 || meta.getInt("head_dim") != 64 ||
                 meta.getInt("hidden_size") != 512 || meta.getInt("codebooks") != 16 ||
@@ -103,11 +105,12 @@ public final class M5Engine implements AutoCloseable {
                 codec = env.createSession(new File(root, "codec_decoder_cached.onnx").getPath(), options);
             }
         } catch (Exception | OutOfMemoryError e) { close(); throw e; }
-        Log.i("M5Perf", String.format(Locale.ROOT, "[M5_LOAD] threads=%d load_ms=%.0f",
-            threads, (System.nanoTime() - loadStart) / 1e6));
+        Log.i("M5Perf", String.format(Locale.ROOT, "[M5_LOAD] threads=%d load_ms=%.0f precision=%s",
+            threads, (System.nanoTime() - loadStart) / 1e6, precision));
     }
 
     public List<Voice> voices() { return Collections.unmodifiableList(voices); }
+    public String precision() { return precision; }
     private static String voiceKey(Voice voice) {
         return voice.name + '\n' + voice.referenceText + '\n' + Arrays.deepHashCode(voice.codes);
     }
