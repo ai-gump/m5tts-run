@@ -68,7 +68,7 @@ m5tts-run/
 - `--left-context` 默认 8 → **4**（首块解码的参考上下文帧数；音频与 8 帧版 corr ≈0.98）。
 
 **02（audio.cpp Metal 路线，4 文件）**
-- `session.cpp`：五刀优化——① 参考编码移入 `prepare()`；② 解码器 prime 截断到 `kLeftContextFrames`（25 帧）；③ prime 移入 prepare + 首次 begin 跳过；④ 首块立即发布（不吃 100ms 尾修剪）；⑤ 解码器状态快照（prepare 存、每请求 restore）。另含分段探针（`[M5_TTFA_MS]`/`[M5_PRIME_MS]`/`[M5_FRAME_*]` 等）；
+- `session.cpp`：五刀优化——① 参考编码移入 `prepare()`；② 解码器 prime 截断到 `kLeftContextFrames`（25 帧）；③ prime 移入 prepare + 首次 begin 跳过；④ 首块立即发布（不吃 100ms 尾修剪）；⑤ 解码器状态快照（prepare 存、每请求 restore）。另含分段探针（`[M5_TTFA_MS]`/`[M5_PRIME_MS]`/`[M5_FRAME_*]` 等）与每请求汇总行 `[M5_PERF]`；
 - `ar.cpp`：`next_frame` 内部探针（select/project/localprefill/heads/backbone 分项计时）；
 - `qwen3_audio_tokenizer_decoder.cpp` + 头文件：`StreamStateSnapshot` 快照 API（ggml_backend_tensor_get/set 拷贝状态张量）。
 
@@ -85,6 +85,32 @@ m5tts-run/
 
 已知局限：语速偏快且无原生语速参数（但**语速随参考音频迁移**，换慢参考是最优解）；
 自然度偏平（与论文 10 人听测一致——50M 容量 + 24kHz + GRPO 只优化可懂度）。
+
+## 性能参数看哪里（自验用）
+
+两个后端都会在服务端每请求打一行汇总，不用只盯浏览器：
+
+| 指标 | GPU（audio.cpp / Metal） | CPU（ONNX） | 测试页 |
+|---|---|---|---|
+| 首帧延迟 ttft | stderr `[M5_TTFA_MS]`；SSE `speech.audio.done.timing.ttft_ms` | stderr `[CPU_PERF] ttft_ms`；SSE 同上 | 「首帧延迟」两张卡（页面实测 / 服务端） |
+| 分段耗时 | `[M5_P_REF_MS]` / `[M5_P_PREFILL_MS]` / `[M5_DEC_FIRST_MS]` / `[M5_FRAME_k_MS]` | —（Python 内部分段未打点） | — |
+| 音频时长 | `[M5_PERF] audio_ms` | `[CPU_PERF] audio_ms` | 音频时长 / 块数 |
+| 生成耗时 | `[M5_PERF] wall_ms` | `[CPU_PERF] gen_ms` | 事件日志末行「生成耗时」 |
+| RTF | `[M5_PERF] rtf`（wall / audio，越小越快） | `[CPU_PERF] rtf` | 「生成实时倍数」≈ 1 / rtf |
+| 实时倍数 | `[M5_PERF] realtime` | `[CPU_PERF] realtime` | 生成实时倍数 |
+| 欠载 / 缓冲 | 仅页面 | 仅页面 | 播放欠载 / 最小缓冲余量 |
+
+采集方式：
+
+- **GPU**：启动服务时把 stderr 落盘，每请求多一行汇总：
+  `./audio.cpp/build/bin/audiocpp_server --config server-config.json --backend metal --no-ui 2>&1 | tee gpu-server.log`
+  行格式：`[M5_PERF] frames=... audio_ms=... wall_ms=... rtf=... realtime=... ttfa_ms=...`
+- **CPU**：`python web/cpu_server.py 2>&1 | tee cpu-server.log`
+  行格式：`[CPU_PERF] ttft_ms=... gen_ms=... audio_ms=... rtf=... realtime=... chunks=... chars=... ref_cache=hit|miss`
+  `ref_cache` 可用来验证参考编码缓存是否生效（首次 miss、同参考后续 hit）。
+- **页面**：六张指标卡 + 事件日志；「服务端 ttft」与页面实测可交叉核对。
+
+**对比提醒**：页面「生成实时倍数」从点击算到流结束（含首帧与网络），`[M5_PERF]` / `[CPU_PERF]` 是服务端单请求生成窗口（从进入 synthesize/generate 到产出结束），两者会略有差异；对比课程里的 RTF 时以服务端日志为准。
 
 ## 许可与合规
 

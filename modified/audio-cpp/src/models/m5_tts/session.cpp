@@ -209,6 +209,8 @@ private:
         }
         runtime::AudioBuffer output{24000, 1, {}};
         bool first_emit_logged = false;
+        double first_emit_ms = -1.0;
+        int64_t perf_frames = 0;
         for (const auto & chunk : chunks) {
             auto target = chunk.text_input->text;
             if (language == "Chinese") target = text::normalize_chinese_text(target);
@@ -264,6 +266,7 @@ private:
                             first_emit_logged = true;
                             const auto probe_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - started).count();
+                            first_emit_ms = probe_ms;
                             std::fprintf(stderr, "[M5_TTFA_MS] %.1f\n", probe_ms);
                         }
                         pending.clear();
@@ -276,6 +279,7 @@ private:
                             first_emit_logged = true;
                             const auto probe_ms = std::chrono::duration<double, std::milli>(
                                 std::chrono::steady_clock::now() - started).count();
+                            first_emit_ms = probe_ms;
                             std::fprintf(stderr, "[M5_TTFA_MS] %.1f\n", probe_ms);
                         }
                         pending.erase(pending.begin(), pending.end() - 2400);
@@ -330,6 +334,7 @@ private:
                 }
             }
             if (!generated.frames) throw std::runtime_error("M5-TTS generated no audio frames");
+            perf_frames += generated.frames;
             if (!eos) debug::log_message(debug::LogLevel::Warning, "M5-TTS reached max_tokens before EOS");
             runtime::AudioBuffer audio;
             if (streaming) audio = stream_.finish();
@@ -345,6 +350,18 @@ private:
             }
             if (audio.samples.size() <= 2400) throw std::runtime_error("M5-TTS generated audio is shorter than its tail trim");
             audio.samples.resize(audio.samples.size() - 2400);
+            if (streaming) {
+                // 每请求一行汇总，便于从服务端 stderr 直接核对性能（与测试页六项指标对齐）
+                const double wall_ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - started).count();
+                const double audio_ms = static_cast<double>(output.samples.size() + audio.samples.size()) / 24.0;
+                std::fprintf(stderr,
+                    "[M5_PERF] frames=%lld audio_ms=%.1f wall_ms=%.1f rtf=%.3f realtime=%.2f ttfa_ms=%.1f\n",
+                    static_cast<long long>(perf_frames), audio_ms, wall_ms,
+                    audio_ms > 0.0 ? wall_ms / audio_ms : 0.0,
+                    wall_ms > 0.0 ? audio_ms / wall_ms : 0.0,
+                    first_emit_ms);
+            }
             output.samples.insert(output.samples.end(), audio.samples.begin(), audio.samples.end());
         }
         runtime::TaskResult result;

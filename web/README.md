@@ -37,6 +37,26 @@ CPU 后端包含三项首帧优化（`--ref-cache` 参考编码缓存 / `--first
 | 生成实时倍数 | 音频时长 ÷ 生成耗时，>1 表示生成喂得饱播放 |
 | 音频时长 / 块数 | PCM s16le 24 kHz |
 
+## 服务端性能日志（与页面六卡对应）
+
+不用打开浏览器也能核对：两个后端每请求都会往 stderr 打一行汇总。
+
+| 后端 | 日志行 | 字段 |
+|---|---|---|
+| GPU（audiocpp_server） | `[M5_PERF] ...` | `frames` / `audio_ms` / `wall_ms` / `rtf`（wall÷audio）/ `realtime`（audio÷wall）/ `ttfa_ms` |
+| CPU（cpu_server.py） | `[CPU_PERF] ...` | `ttft_ms` / `gen_ms` / `audio_ms` / `rtf` / `realtime` / `chunks` / `chars` / `ref_cache=hit\|miss` |
+
+启动时把 stderr 一并落盘即可长期观察：
+
+```bash
+./audio.cpp/build/bin/audiocpp_server --config server-config.json --backend metal --no-ui 2>&1 | tee gpu-server.log
+python web/cpu_server.py 2>&1 | tee cpu-server.log
+```
+
+`ref_cache` 用来验证参考编码缓存：同一参考音频首次 `miss`、之后 `hit`，首帧应从 ~600ms 降到 ~100ms 量级。
+
+**对比提醒**：页面「生成实时倍数」从点击算到流结束（含首帧与网络），服务端 `rtf`/`realtime` 是单请求生成窗口，数值会略有差异；与课程实测表对比时以服务端日志为准。
+
 ### 参考音色：默认 or 上传
 
 页面提供两种参考音色模式：

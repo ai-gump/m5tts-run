@@ -77,6 +77,8 @@ class Handler(BaseHTTPRequestHandler):
         first_frames = int(req.get("first_frames") or 2)
         left_context = int(req.get("left_context") or 4)
         seed = int(req.get("seed") or 1234)
+        ref_cache = ref_cache_path(prompt_wav)
+        ref_cache_hit = os.path.exists(ref_cache)
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -85,13 +87,14 @@ class Handler(BaseHTTPRequestHandler):
         started = time.perf_counter()
         first_pcm = None
         emitted = 0
+        chunks = 0
         try:
             with _LOCK:
                 for pcm in MODEL.generate(
                     text, prompt_wav, prompt_text,
                     stream=True, first_frames=first_frames, chunk_frames=4,
                     left_context=left_context, seed=seed, max_frames=500,
-                    ref_cache=ref_cache_path(prompt_wav),
+                    ref_cache=ref_cache,
                 ):
                     if first_pcm is None:
                         first_pcm = time.perf_counter() - started
@@ -102,8 +105,17 @@ class Handler(BaseHTTPRequestHandler):
                         f"data: {json.dumps({'type': 'speech.audio.delta', 'audio': b64})}\n\n".encode())
                     self.wfile.flush()
                     emitted += len(pcm)
+                    chunks += 1
+            gen_ms = (time.perf_counter() - started) * 1000
+            audio_ms = emitted / 24000 * 1000
+            rtf = gen_ms / audio_ms if audio_ms > 0 else 0.0
+            print(
+                f"[CPU_PERF] ttft_ms={(first_pcm or 0) * 1000:.1f} gen_ms={gen_ms:.1f} "
+                f"audio_ms={audio_ms:.1f} rtf={rtf:.3f} realtime={(audio_ms / gen_ms if gen_ms > 0 else 0):.2f} "
+                f"chunks={chunks} chars={len(text)} ref_cache={'hit' if ref_cache_hit else 'miss'}",
+                file=sys.stderr, flush=True)
             timing = {"ttft_ms": round((first_pcm or 0) * 1000, 1),
-                      "audio_ms": round(emitted / 24000 * 1000, 1)}
+                      "audio_ms": round(audio_ms, 1)}
             self.wfile.write(f"data: {json.dumps({'type': 'speech.audio.done', 'timing': timing})}\n\n".encode())
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
