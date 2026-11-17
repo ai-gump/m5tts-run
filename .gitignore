@@ -1,10 +1,10 @@
 # 大文件与第三方代码不入库（见 README"不在本仓库的部分"）
-weights/
+/weights/
 *.gguf
-M5-TTS/
-audio.cpp/
-outputs/
-.venv/
+/M5-TTS/
+/audio.cpp/
+/outputs/
+/.venv/
 *.log
 batch*.txt
 .DS_Store
