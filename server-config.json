@@ -1,0 +1,30 @@
+{
+  "host": "127.0.0.1",
+  "port": 8090,
+  "backend": "metal",
+  "threads": 8,
+  "lazy_load": true,
+  "max_loaded_models": 1,
+  "models": [
+    {
+      "id": "m5-tts",
+      "family": "m5_tts",
+      "path": "/Users/jacoblui/Documents/Project/m5tts-run/m5-voiceclone-f16.gguf",
+      "task": "clon",
+      "mode": "streaming",
+      "default_voice_preset": {
+        "voice_ref": "/Users/jacoblui/Documents/Project/m5tts-run/M5-TTS/assets/aslp_default_voice.wav",
+        "reference_text": "猪携带该疾病，然后通过蚊子传染给人类。"
+      },
+      "voice_presets": {
+        "default": {
+          "voice_ref": "/Users/jacoblui/Documents/Project/m5tts-run/M5-TTS/assets/aslp_default_voice.wav",
+          "reference_text": "猪携带该疾病，然后通过蚊子传染给人类。"
+        }
+      },
+      "session_options": {
+        "m5_tts.weight_type": "native"
+      }
+    }
+  ]
+}

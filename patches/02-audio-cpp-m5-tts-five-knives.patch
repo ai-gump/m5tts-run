@@ -1,0 +1,311 @@
+diff --git a/include/engine/framework/codecs/qwen3_audio_tokenizer_runtime.h b/include/engine/framework/codecs/qwen3_audio_tokenizer_runtime.h
+index 7a55ba4..591a861 100644
+--- a/include/engine/framework/codecs/qwen3_audio_tokenizer_runtime.h
++++ b/include/engine/framework/codecs/qwen3_audio_tokenizer_runtime.h
+@@ -11,6 +11,7 @@
+ #include <map>
+ #include <memory>
+ #include <string>
++#include <optional>
+ #include <vector>
+ 
+ namespace engine::core { class ConstantTensorCache; }
+@@ -95,6 +96,14 @@ public:
+         bool stateful_stream = false);
+     ~Qwen3SpeechTokenizerDecoderRuntime();
+ 
++    // 快照/恢复流式解码器状态（卷积+注意力历史），用于把"参考音频 prime"移出每次请求
++    struct StreamStateSnapshot {
++        std::vector<uint8_t> data;
++        int64_t frames = 0;
++    };
++    std::optional<StreamStateSnapshot> snapshot_stream_state() const;
++    bool restore_stream_state(const StreamStateSnapshot & snapshot) const;
++
+     runtime::AudioBuffer decode(const Qwen3SpeechCodes & codec_codes) const;
+     runtime::AudioBuffer decode_stream_chunk(
+         const Qwen3SpeechCodes & codec_codes,
+diff --git a/src/framework/codecs/qwen3_audio_tokenizer_decoder.cpp b/src/framework/codecs/qwen3_audio_tokenizer_decoder.cpp
+index e13f10e..87edded 100644
+--- a/src/framework/codecs/qwen3_audio_tokenizer_decoder.cpp
++++ b/src/framework/codecs/qwen3_audio_tokenizer_decoder.cpp
+@@ -249,6 +249,28 @@ public:
+         frames = 0;
+     }
+ 
++    size_t byte_size() const {
++        size_t total = 0;
++        for (const auto & kv : tensors_) for (const auto & tv : kv.second) total += ggml_nbytes(tv.tensor);
++        return total;
++    }
++
++    void copy_out(uint8_t * dst) const {
++        for (const auto & kv : tensors_) for (const auto & tv : kv.second) {
++            const size_t n = ggml_nbytes(tv.tensor);
++            ggml_backend_tensor_get(tv.tensor, dst, 0, n);
++            dst += n;
++        }
++    }
++
++    void copy_in(const uint8_t * src) {
++        for (const auto & kv : tensors_) for (const auto & tv : kv.second) {
++            const size_t n = ggml_nbytes(tv.tensor);
++            ggml_backend_tensor_set(tv.tensor, src, 0, n);
++            src += n;
++        }
++    }
++
+     int64_t frames = 0;
+ 
+ private:
+@@ -1523,6 +1545,23 @@ runtime::AudioBuffer Qwen3SpeechTokenizerDecoderRuntime::decode_stream_chunk(
+     return runtime::AudioBuffer{kSampleRate, 1, std::move(decoded)};
+ }
+ 
++std::optional<Qwen3SpeechTokenizerDecoderRuntime::StreamStateSnapshot>
++Qwen3SpeechTokenizerDecoderRuntime::snapshot_stream_state() const {
++    if (!stream_state_ || stream_state_->byte_size() == 0) return std::nullopt;
++    StreamStateSnapshot snapshot;
++    snapshot.frames = stream_state_->frames;
++    snapshot.data.resize(stream_state_->byte_size());
++    stream_state_->copy_out(snapshot.data.data());
++    return snapshot;
++}
++
++bool Qwen3SpeechTokenizerDecoderRuntime::restore_stream_state(const StreamStateSnapshot & snapshot) const {
++    if (!stream_state_ || snapshot.data.size() != stream_state_->byte_size()) return false;
++    stream_state_->copy_in(snapshot.data.data());
++    stream_state_->frames = snapshot.frames;
++    return true;
++}
++
+ void Qwen3SpeechTokenizerDecoderRuntime::reset_stream() const {
+     if (stream_state_ != nullptr) stream_state_->reset();
+ }
+diff --git a/src/models/m5_tts/ar.cpp b/src/models/m5_tts/ar.cpp
+index 35cc234..cbbd289 100644
+--- a/src/models/m5_tts/ar.cpp
++++ b/src/models/m5_tts/ar.cpp
+@@ -1,3 +1,4 @@
++#include <cstdio>
+ #include "engine/models/m5_tts/ar.h"
+ 
+ #include "engine/framework/core/backend_weight_store.h"
+@@ -177,15 +178,20 @@ public:
+     }
+ 
+     AudioFrame next_frame(const TokenSelector & select) {
++        const bool probe = (frame_ == 0);
++        const auto t0 = std::chrono::steady_clock::now();
+         AudioFrame result{};
+         result[0] = select(frame_, 0, current_.logits, frame_ > 6);
++        const auto t1 = std::chrono::steady_clock::now();
+         const auto first = project_audio(0, result[0]);
+         core::write_tensor_f32(global_hidden_, current_.hidden);
+         auxiliary_->compute(initial_projection_id_);
+         auto projected = core::read_tensor_f32(initial_projection_.tensor);
+         if (bf16_) core::round_f32_to_bf16_in_place(projected);
+         projected.insert(projected.end(), first.begin(), first.end());
++        const auto t2 = std::chrono::steady_clock::now();
+         auto prefill = local_->prefill_embeddings_into_decode_cache(projected, 2, flash_ ? 256 : 16);
++        const auto t3 = std::chrono::steady_clock::now();
+         modules::CausalDecoderStepResult state;
+         state.hidden = std::move(prefill.hidden);
+         for (size_t codebook = 1; codebook < result.size(); ++codebook) {
+@@ -196,10 +202,17 @@ public:
+             result[codebook] = select(frame_, static_cast<int64_t>(codebook), logits, true);
+             if (codebook + 1 < result.size()) state = local_->decode_embedding(project_audio(codebook, result[codebook]));
+         }
++        const auto t4 = std::chrono::steady_clock::now();
+         ++frame_;
+         if (std::any_of(result.begin(), result.end(), [](int32_t token) { return token != 0; })) {
+             current_ = backbone_->decode_embedding(audio_embedding(result));
+         }
++        if (probe) {
++            const auto t5 = std::chrono::steady_clock::now();
++            auto ms = [](auto a, auto b) { return std::chrono::duration<double, std::milli>(b - a).count(); };
++            std::fprintf(stderr, "[M5_NF] select=%.1f project=%.1f localprefill=%.1f heads=%.1f bbone=%.1f total=%.1f\n",
++                ms(t0,t1), ms(t1,t2), ms(t2,t3), ms(t3,t4), ms(t4,t5), ms(t0,t5));
++        }
+         return result;
+     }
+ 
+diff --git a/src/models/m5_tts/session.cpp b/src/models/m5_tts/session.cpp
+index c8aca03..c525200 100644
+--- a/src/models/m5_tts/session.cpp
++++ b/src/models/m5_tts/session.cpp
+@@ -1,3 +1,4 @@
++#include <cstdio>
+ #include "engine/models/m5_tts/session.h"
+ 
+ #include "engine/models/m5_tts/ar.h"
+@@ -107,6 +108,44 @@ public:
+     runtime::RunMode run_mode() const override { return task_.mode; }
+     void prepare(const runtime::SessionPreparationRequest & request) override {
+         prepared_voice_ = request.voice;
++        // 预热 1：提前把参考音频编码成 codec codes（否则要等 synthesize 首帧才做，几百 ms）
++        if (prepared_voice_ && prepared_voice_->speaker && prepared_voice_->speaker->audio) {
++            (void)reference_codes(*prepared_voice_->speaker->audio);
++        }
++        // 预热 2：把解码器 state 提前 prime 到"参考音频尾部"（流式解码只需最近 kLeftContextFrames 帧）
++        // 已有快照时直接恢复，避免每个请求重复 prime（server 每请求都会 prepare）
++        if (prepared_voice_ && prepared_voice_->speaker && prepared_voice_->speaker->audio) {
++            if (decoder_state_snapshot_ && decoder_->restore_stream_state(*decoder_state_snapshot_)) {
++                decoder_primed_ = true;
++                mark_prepared();
++                return;
++            }
++            const auto & ref_codes = reference_codes(*prepared_voice_->speaker->audio);
++            const int64_t prime_begin = std::max<int64_t>(
++                0, ref_codes.frames - codecs::Qwen3SpeechTokenizerDecoderRuntime::kLeftContextFrames);
++            decoder_->reset_stream();
++            for (int64_t offset = prime_begin; offset < ref_codes.frames; offset += 4) {
++                const auto count = std::min<int64_t>(4, ref_codes.frames - offset);
++                codecs::Qwen3SpeechCodes part;
++                part.code_groups = 16;
++                part.frames = count;
++                part.codes.assign(ref_codes.codes.begin() + offset * 16,
++                                  ref_codes.codes.begin() + (offset + count) * 16);
++                (void)decoder_->decode_stream_chunk(part, 0, 4);
++            }
++            decoder_state_snapshot_ = decoder_->snapshot_stream_state();
++            decoder_primed_ = true;
++        }
++        // 预热 3：预跑一次骨干 + MTP 前向，触发骨干/局部解码图的首次执行（Metal kernel 编译）
++        {
++            std::vector<int32_t> warm_ids{assets_->bos_token_id, assets_->eos_token_id};
++            auto warm_prompt = ar_->text_embeddings(warm_ids);
++            ar_->begin(warm_prompt, 500);  // 与默认 max_tokens 对齐，预热同一档 KV cache
++            (void)ar_->next_frame([](int64_t, int64_t, const std::vector<float> & logits, bool) {
++                if (logits.empty()) return 0;
++                return static_cast<int>(std::max_element(logits.begin(), logits.end()) - logits.begin());
++            });
++        }
+         mark_prepared();
+     }
+     runtime::TaskResult run(const runtime::TaskRequest & request) override { return synthesize(request, false); }
+@@ -164,7 +203,12 @@ private:
+             text::parse_text_chunk_size_override(request.options).value_or(200),
+             text::parse_text_chunk_mode_override(request.options).value_or(text::TextChunkMode::Default));
+         const codecs::Qwen3SpeechCodes * reference = cloning ? &reference_codes(*reference_audio) : nullptr;
++        if (streaming) {
++            const auto pr = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
++            std::fprintf(stderr, "[M5_P_REF_MS] %.1f\n", pr);
++        }
+         runtime::AudioBuffer output{24000, 1, {}};
++        bool first_emit_logged = false;
+         for (const auto & chunk : chunks) {
+             auto target = chunk.text_input->text;
+             if (language == "Chinese") target = text::normalize_chinese_text(target);
+@@ -183,9 +227,14 @@ private:
+                 }
+             }
+             ar_->begin(prompt, frames);
++            if (streaming) {
++                const auto pp = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
++                std::fprintf(stderr, "[M5_P_PREFILL_MS] %.1f\n", pp);
++            }
+             codecs::Qwen3SpeechCodes generated;
+             generated.code_groups = 16;
+             std::vector<float> pending;
++            bool first_emit_done = false;
+             if (streaming) {
+                 runtime::StreamingAudioConfig config;
+                 config.frame_width = 16;
+@@ -195,22 +244,57 @@ private:
+                     codes.code_groups = 16;
+                     codes.frames = static_cast<int64_t>(window.frames());
+                     codes.codes.assign(window.data, window.data + window.frames() * 16);
+-                    return decoder_->decode_stream_chunk(codes, 0, 4);
++                    const auto d0 = std::chrono::steady_clock::now();
++                    auto out = decoder_->decode_stream_chunk(codes, 0, 4);
++                    if (window.first_frame == 0) {
++                        std::fprintf(stderr, "[M5_DEC_FIRST_MS] %.1f\n", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - d0).count());
++                    }
++                    return out;
+                 }, [&](const runtime::StreamEvent & event) {
+                     pending.insert(pending.end(), event.audio_output->samples.begin(), event.audio_output->samples.end());
+-                    // Upstream removes the last 100 ms. Hold it until EOS rather
+-                    // than publishing samples that would subsequently be removed.
+-                    if (pending.size() > 2400) {
++                    // 首块立即发布（不吃 100ms 尾修剪），把首帧延迟压到最低；
++                    // 后续块恢复"保留尾部 100ms 到 EOS"的上游语义。
++                    if (!first_emit_done && !pending.empty()) {
++                        first_emit_done = true;
++                        runtime::StreamEvent emitted;
++                        emitted.audio_output = runtime::AudioBuffer{24000, 1, pending};
++                        if (stream_event_sink()) stream_event_sink()(emitted);
++                        std::fprintf(stderr, "[M5_FIRST_EMIT_SAMPLES] %zu\n", pending.size());
++                        if (!first_emit_logged) {
++                            first_emit_logged = true;
++                            const auto probe_ms = std::chrono::duration<double, std::milli>(
++                                std::chrono::steady_clock::now() - started).count();
++                            std::fprintf(stderr, "[M5_TTFA_MS] %.1f\n", probe_ms);
++                        }
++                        pending.clear();
++                    } else if (pending.size() > 2400) {
+                         runtime::StreamEvent emitted;
+                         emitted.audio_output = runtime::AudioBuffer{24000, 1,
+                             std::vector<float>(pending.begin(), pending.end() - 2400)};
+                         if (stream_event_sink()) stream_event_sink()(emitted);
++                        if (!first_emit_logged) {
++                            first_emit_logged = true;
++                            const auto probe_ms = std::chrono::duration<double, std::milli>(
++                                std::chrono::steady_clock::now() - started).count();
++                            std::fprintf(stderr, "[M5_TTFA_MS] %.1f\n", probe_ms);
++                        }
+                         pending.erase(pending.begin(), pending.end() - 2400);
+                     }
+                 }, {}, [this, reference] {
++                    if (decoder_primed_) {  // prepare 已 prime 到参考尾部，首次直接沿用
++                        decoder_primed_ = false;
++                        return;
++                    }
++                    if (decoder_state_snapshot_ && decoder_->restore_stream_state(*decoder_state_snapshot_)) {
++                        return;  // 直接恢复"参考尾部"状态，省掉重新 prime 的几百 ms
++                    }
++                    const auto p0 = std::chrono::steady_clock::now();
+                     decoder_->reset_stream();
+                     if (reference) {
+-                        for (int64_t offset = 0; offset < reference->frames; offset += 4) {
++                        // 流式解码器只需最近的 kLeftContextFrames 帧上下文即可进入正确状态
++                        const int64_t prime_begin = std::max<int64_t>(
++                            0, reference->frames - codecs::Qwen3SpeechTokenizerDecoderRuntime::kLeftContextFrames);
++                        for (int64_t offset = prime_begin; offset < reference->frames; offset += 4) {
+                             const auto count = std::min<int64_t>(4, reference->frames - offset);
+                             codecs::Qwen3SpeechCodes codes;
+                             codes.code_groups = 16;
+@@ -220,6 +304,9 @@ private:
+                             (void)decoder_->decode_stream_chunk(codes, 0, 4);
+                         }
+                     }
++                    std::fprintf(stderr, "[M5_PRIME_MS] %.1f ref_frames=%lld\n",
++                        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - p0).count(),
++                        reference ? (long long)reference->frames : 0LL);
+                 });
+             }
+             bool eos = false;
+@@ -234,7 +321,13 @@ private:
+                 for (const auto token : frame) codes.push_back(std::clamp(token - 1, int32_t{0}, int32_t{2047}));
+                 generated.codes.insert(generated.codes.end(), codes.begin(), codes.end());
+                 ++generated.frames;
+-                if (streaming) stream_.push(codes);
++                if (streaming) {
++                    stream_.push(codes);
++                    if (generated.frames <= 8) {
++                        const auto fms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
++                        std::fprintf(stderr, "[M5_FRAME_%lld_MS] %.1f\n", (long long)generated.frames, fms);
++                    }
++                }
+             }
+             if (!generated.frames) throw std::runtime_error("M5-TTS generated no audio frames");
+             if (!eos) debug::log_message(debug::LogLevel::Warning, "M5-TTS reached max_tokens before EOS");
+@@ -270,6 +363,8 @@ private:
+     runtime::StreamingAudioController<int32_t> stream_;
+     std::optional<std::pair<std::vector<float>, codecs::Qwen3SpeechCodes>> reference_;
+     std::optional<runtime::VoiceCondition> prepared_voice_;
++    bool decoder_primed_ = false;  // prepare 已把解码器 state prime 到参考尾部，首次 begin 可跳过 reset+prime
++    std::optional<codecs::Qwen3SpeechTokenizerDecoderRuntime::StreamStateSnapshot> decoder_state_snapshot_;  // prime 后的状态快照，后续请求 restore 代替重新 prime
+     assets::TensorStorageType codec_storage_ = assets::TensorStorageType::Native;
+     bool flash_ = false;
+ };

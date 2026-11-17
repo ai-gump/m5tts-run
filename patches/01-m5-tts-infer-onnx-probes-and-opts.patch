@@ -1,0 +1,84 @@
+diff --git a/infer_onnx.py b/infer_onnx.py
+index 2a82ec5..cf45cd6 100644
+--- a/infer_onnx.py
++++ b/infer_onnx.py
+@@ -194,7 +194,7 @@ class M5Onnx:
+         return pcm.reshape(-1)
+ 
+     def generate(self, text, prompt_wav, prompt_text, *, lang="Chinese", seed=1234, max_frames=500,
+-                 stream=False, first_frames=4, chunk_frames=4, left_context=8):
++                 stream=False, first_frames=2, chunk_frames=4, left_context=8, ref_cache=None):
+         """Yield 24kHz float32 PCM. This is generation streaming, not audio playback."""
+         if not isinstance(text, str) or not text.strip() or not isinstance(prompt_text, str) or not prompt_text.strip():
+             raise ValueError("Target text and accurate reference transcript are required")
+@@ -211,12 +211,27 @@ class M5Onnx:
+                       "cuda_use_tf32": False if self.device == "cuda" else None,
+                       "original_text": original_text, "normalized_text": text}
+         started = time.perf_counter()
+-        prompt = self.encode_reference(audio)
++        prompt = None
++        if ref_cache:
++            import hashlib, os as _os
++            _h = hashlib.sha1(open(prompt_wav, "rb").read()).hexdigest()
++            if _os.path.exists(ref_cache):
++                _z = np.load(ref_cache, allow_pickle=False)
++                if str(_z["sha1"]) == _h:
++                    prompt = _z["codes"]
++            if prompt is None:
++                prompt = self.encode_reference(audio)
++                np.savez(ref_cache, codes=prompt, sha1=np.array(_h))
++        else:
++            prompt = self.encode_reference(audio)
++        print(f"[P_REF] {(time.perf_counter()-started)*1000:.1f}ms", file=__import__('sys').stderr)
++        _t_embed = time.perf_counter()
+         ids = np.array(self.tokenizer.encode(sentence).ids)
+         prefix = self.audio_embeddings[prompt + 1 + self.offsets].sum(axis=1)
+         hidden = np.concatenate((self.text_embeddings[ids], prefix), axis=0)[None]
+         if hidden.shape[1] + max_frames > self.meta["max_sequence"]:
+             raise ValueError("Reference plus text and generation budget exceed the model context length")
++        print(f"[P_EMBED] {(time.perf_counter()-_t_embed)*1000:.1f}ms", file=__import__('sys').stderr)
+         past = np.empty((self.meta["layers"], 2, 1, self.meta["kv_heads"], 0, self.meta["head_dim"]), np.float32)
+         positions = np.arange(hidden.shape[1], dtype=np.int64)[None]
+         if self.codec_mode == "cached":
+@@ -251,8 +266,11 @@ class M5Onnx:
+             decoded = len(generated)
+             return pcm[(new_start - window_start) * self.meta["hop_length"]:]
+ 
++        _t_prefill = time.perf_counter()
+         for index in range(max_frames):
+             last, past = self.sessions["backbone"].run(None, dict(hidden=hidden, positions=positions, past=past))
++            if index == 0:
++                print(f"[P_PREFILL] {(time.perf_counter()-_t_prefill)*1000:.1f}ms", file=__import__('sys').stderr)
+             noise = rng.exponential(size=(16, 1, self.meta["audio_vocab"])).astype(np.float32)
+             noise = np.maximum(noise, np.finfo(np.float32).tiny)
+             codes, hidden = self.sessions["depth_frame"].run(None, dict(hidden=last, noise=noise,
+@@ -264,7 +282,10 @@ class M5Onnx:
+             generated_buffer[index] = generated[-1]
+             positions = positions[:, -1:] + 1
+             if stream and len(generated) - decoded >= (first_frames if decoded == 0 else chunk_frames):
++                _t_dec = time.perf_counter()
+                 pending = np.concatenate((pending, decode_new()))
++                if decoded and first_pcm_s is None:
++                    print(f"[P_FIRSTDEC] {(time.perf_counter()-_t_dec)*1000:.1f}ms", file=__import__('sys').stderr)
+                 if len(pending) > 2400:
+                     pcm, pending = pending[:-2400], pending[-2400:]
+                     if not np.isfinite(pcm).all():
+@@ -307,6 +328,9 @@ def main():
+     parser.add_argument("--prompt-text", required=True)
+     parser.add_argument("--output", default="outputs/onnx.wav")
+     parser.add_argument("--threads", type=int, default=4)
++    parser.add_argument("--ref-cache", default=None, help="Path to cache encoded reference codes (npz)")
++    parser.add_argument("--first-frames", type=int, default=2, help="Frames in the first streamed chunk")
++    parser.add_argument("--left-context", type=int, default=4, help="Reference context frames kept for streaming decode")
+     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu", help="ONNX execution device (default: cpu)")
+     parser.add_argument("--device-id", type=int, default=0, help="CUDA GPU index among devices visible to this process")
+     parser.add_argument("--lang", default="Chinese")
+@@ -333,7 +357,7 @@ def main():
+     try:
+         with sf.SoundFile(temporary, mode="w", samplerate=model.sample_rate, channels=1, subtype="PCM_16", format="WAV") as stream:
+             for pcm in model.generate(args.text, args.prompt_wav, args.prompt_text, lang=args.lang, seed=args.seed,
+-                                      max_frames=args.max_frames, stream=args.stream):
++                                      max_frames=args.max_frames, stream=args.stream, ref_cache=args.ref_cache, first_frames=args.first_frames, left_context=args.left_context):
+                 stream.write(pcm)
+         temporary.replace(output)
+     finally:

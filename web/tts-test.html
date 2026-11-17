@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M5-TTS 流式播放大厅 · 首帧与流畅度测试</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #070a12;
+    --panel: rgba(255,255,255,.045);
+    --stroke: rgba(255,255,255,.10);
+    --txt: #e8ecf4;
+    --muted: #8b94a7;
+    --cyan: #22d3ee;
+    --violet: #818cf8;
+    --green: #34d399;
+    --amber: #fbbf24;
+    --red: #f87171;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; color: var(--txt);
+    font: 15px/1.6 -apple-system, "PingFang SC", "Helvetica Neue", sans-serif;
+    background: var(--bg);
+    min-height: 100vh;
+  }
+  .glow { position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background:
+      radial-gradient(720px 420px at 12% -8%, rgba(34,211,238,.14), transparent 60%),
+      radial-gradient(720px 480px at 92% 4%, rgba(129,140,248,.16), transparent 60%),
+      radial-gradient(900px 600px at 50% 120%, rgba(34,211,238,.06), transparent 60%);
+  }
+  main { position: relative; z-index: 1; max-width: 1180px; margin: 0 auto; padding: 34px 22px 60px; }
+  header { display: flex; align-items: center; gap: 14px; margin-bottom: 6px; }
+  .logo {
+    width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center;
+    font-weight: 800; font-size: 15px; letter-spacing: .5px;
+    background: linear-gradient(135deg, var(--cyan), var(--violet));
+    color: #06121c; box-shadow: 0 0 24px rgba(34,211,238,.35);
+  }
+  h1 { font-size: 22px; margin: 0; font-weight: 700; letter-spacing: .2px; }
+  h1 em { font-style: normal; background: linear-gradient(90deg, var(--cyan), var(--violet));
+    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .sub { color: var(--muted); font-size: 12.5px; margin: 2px 0 26px; }
+  .sub b { color: #aab4c8; font-weight: 600; }
+  .grid { display: grid; grid-template-columns: minmax(420px, 520px) 1fr; gap: 22px; align-items: start; }
+  @media (max-width: 960px) { .grid { grid-template-columns: 1fr; } }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--stroke); border-radius: 20px;
+    padding: 20px 20px 18px; backdrop-filter: blur(14px);
+    box-shadow: 0 10px 40px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.05);
+  }
+  .field { margin-bottom: 14px; }
+  .field > label, .field > .flabel { display: block; font-size: 12px; color: var(--muted);
+    letter-spacing: .4px; margin-bottom: 6px; text-transform: uppercase; }
+  .field .hint { color: var(--muted); font-size: 11.5px; text-transform: none; letter-spacing: 0; }
+
+  /* segmented radios */
+  .seg { display: inline-flex; gap: 8px; flex-wrap: wrap; }
+  .pill { position: relative; cursor: pointer; }
+  .pill input { position: absolute; opacity: 0; pointer-events: none; }
+  .pill span {
+    display: inline-block; padding: 8px 14px; border-radius: 999px; font-size: 13px;
+    color: #aab4c8; border: 1px solid var(--stroke); background: rgba(255,255,255,.03);
+    transition: all .18s ease; white-space: nowrap;
+  }
+  .pill:hover span { border-color: rgba(129,140,248,.5); color: #dfe6f3; }
+  .pill:has(input:checked) span {
+    color: #06121c; font-weight: 650;
+    background: linear-gradient(135deg, var(--cyan), var(--violet));
+    border-color: transparent; box-shadow: 0 0 18px rgba(34,211,238,.35);
+  }
+  .pill:has(input:disabled) span { opacity: .35; cursor: not-allowed; }
+  .file-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  input[type="file"] { font-size: 12px; color: var(--muted); max-width: 210px; }
+  input[type="file"]::file-selector-button {
+    background: rgba(255,255,255,.07); color: #cfd6e4; border: 1px solid var(--stroke);
+    border-radius: 9px; padding: 6px 10px; font: inherit; font-size: 12px; cursor: pointer; margin-right: 8px;
+    transition: all .18s ease;
+  }
+  input[type="file"]::file-selector-button:hover { border-color: rgba(34,211,238,.5); color: #fff; }
+  input[type="text"], textarea {
+    width: 100%; font: inherit; font-size: 14px; color: var(--txt);
+    background: rgba(255,255,255,.04); border: 1px solid var(--stroke); border-radius: 12px;
+    padding: 10px 12px; outline: none; transition: border-color .18s ease, box-shadow .18s ease;
+  }
+  input[type="text"]:focus, textarea:focus {
+    border-color: rgba(34,211,238,.55); box-shadow: 0 0 0 3px rgba(34,211,238,.12);
+  }
+  input::placeholder, textarea::placeholder { color: #5d6779; }
+  textarea { min-height: 96px; resize: vertical; }
+  input:disabled { opacity: .4; }
+
+  /* speed */
+  .rate-wrap { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .rate-track { position: relative; width: 200px; }
+  .rate-track input[type="range"] { width: 200px; margin: 0; -webkit-appearance: none; appearance: none;
+    height: 6px; border-radius: 999px; outline: none;
+    background: linear-gradient(90deg, rgba(34,211,238,.25), rgba(129,140,248,.25));
+  }
+  .rate-track input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 20px; height: 20px; border-radius: 50%;
+    background: linear-gradient(135deg, var(--cyan), var(--violet));
+    border: 2px solid #0b1020; box-shadow: 0 0 14px rgba(34,211,238,.6); cursor: pointer;
+  }
+  .rate-ticks { position: absolute; left: 0; right: 0; top: 50%; height: 0; pointer-events: none; }
+  .rate-tick { position: absolute; width: 7px; height: 7px; margin-left: -3.5px; margin-top: -3.5px;
+    border-radius: 50%; background: #394154; }
+  .rate-tick.active { background: var(--cyan); box-shadow: 0 0 10px rgba(34,211,238,.9); }
+  .rate-scale { display: flex; justify-content: space-between; width: 200px; font-size: 10.5px; color: #6b7488; margin-top: 2px; }
+  .rate-scale .rate-mid { color: var(--cyan); font-weight: 600; }
+  #rate-v { font-variant-numeric: tabular-nums; font-weight: 700; font-size: 15px;
+    background: linear-gradient(90deg, var(--cyan), var(--violet)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+  .actions { display: flex; align-items: center; gap: 12px; margin-top: 18px; flex-wrap: wrap; }
+  button {
+    font: inherit; font-size: 14px; font-weight: 650; cursor: pointer; border: 0;
+    border-radius: 12px; padding: 11px 20px; transition: transform .15s ease, box-shadow .2s ease, opacity .15s;
+  }
+  #go {
+    color: #06121c; background: linear-gradient(135deg, var(--cyan), var(--violet));
+    box-shadow: 0 6px 24px rgba(34,211,238,.35);
+  }
+  #go:hover { transform: translateY(-1px); box-shadow: 0 10px 30px rgba(34,211,238,.45); }
+  #go:disabled { opacity: .45; cursor: default; transform: none; }
+  #warm { color: #cbd4e4; background: rgba(255,255,255,.06); border: 1px solid var(--stroke); }
+  #warm:hover { border-color: rgba(129,140,248,.5); }
+  #play { font-size: 12px; color: var(--muted); }
+
+  /* metrics */
+  .metrics { display: grid; grid-template-columns: repeat(2, minmax(180px, 1fr)); gap: 14px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--stroke); border-radius: 18px;
+    padding: 16px 18px; backdrop-filter: blur(14px); position: relative; overflow: hidden;
+    box-shadow: 0 8px 30px rgba(0,0,0,.28), inset 0 1px 0 rgba(255,255,255,.05);
+    transition: border-color .2s ease, transform .2s ease;
+  }
+  .card:hover { border-color: rgba(129,140,248,.4); transform: translateY(-1px); }
+  .card::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(220px 80px at 85% 0%, rgba(34,211,238,.10), transparent 70%); }
+  .card .k { font-size: 11.5px; color: var(--muted); letter-spacing: .5px; text-transform: uppercase; }
+  .card .v { font-size: 30px; font-weight: 750; letter-spacing: .3px; margin: 4px 0 2px;
+    font-variant-numeric: tabular-nums; }
+  .card .note { font-size: 11.5px; color: #6b7488; }
+  .card.accent { border-color: rgba(34,211,238,.35); }
+  .card.accent .v { background: linear-gradient(90deg, var(--cyan), var(--violet));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    text-shadow: 0 0 24px rgba(34,211,238,.25); }
+  .v.ok { color: var(--green); } .v.warn { color: var(--amber); } .v.bad { color: var(--red); }
+  .log-card { grid-column: 1 / -1; }
+  #log {
+    margin-top: 8px; background: rgba(0,0,0,.35); border: 1px solid var(--stroke);
+    border-radius: 12px; padding: 10px 12px; min-height: 64px; max-height: 200px; overflow: auto;
+    font: 12px/1.7 ui-monospace, "SF Mono", Menlo, monospace; color: #9fb0c8; white-space: pre-wrap;
+  }
+</style>
+</head>
+<body>
+<div class="glow"></div>
+<main>
+  <header>
+    <div class="logo">M5</div>
+    <div>
+      <h1>M5-TTS <em>流式播放大厅</em></h1>
+      <div style="color:var(--muted);font-size:12px;">audio.cpp · Metal ／ ONNX · CPU 双后端 · Web Audio 实时播放</div>
+    </div>
+  </header>
+  <p class="sub">测试点：<b>① 首帧延迟</b>（点击 → 第一块音频到达）　<b>② 播放流畅度</b>（生成能否喂饱播放，欠载 = 卡顿）</p>
+
+  <div class="grid">
+    <section class="panel">
+      <div class="field">
+        <span class="flabel">运行后端</span>
+        <div class="seg">
+          <label class="pill"><input type="radio" name="backend" id="backend-gpu" checked><span>GPU · Metal</span></label>
+          <label class="pill"><input type="radio" name="backend" id="backend-cpu"><span>CPU · ONNX</span></label>
+        </div>
+      </div>
+      <div class="field">
+        <span class="flabel">参考音色</span>
+        <div class="seg" style="margin-bottom:8px;">
+          <label class="pill"><input type="radio" name="voice" id="voice-default" checked><span>默认音色</span></label>
+          <label class="pill"><input type="radio" name="voice" id="voice-upload"><span>上传参考音频</span></label>
+        </div>
+        <div class="file-row">
+          <input type="file" id="ref-file" accept="audio/*" disabled>
+          <span id="ref-status" style="font-size:11.5px;color:var(--muted);"></span>
+        </div>
+      </div>
+      <div class="field">
+        <span class="flabel">① 参考音频转写 <span class="hint">· 上传录音里实际念的字，逐字一致</span></span>
+        <input type="text" id="ref-text" placeholder="只在上传模式使用；须与音频逐字一致" disabled>
+      </div>
+      <div class="field">
+        <span class="flabel">② 要合成的文本 <span class="hint">· 模型念的是这一段</span></span>
+        <textarea id="text">人工智能正在改变我们生活和工作的方式，语音合成技术让机器可以用自然的声音与人交流。无论是陪伴机器人、智能助手还是无障碍阅读，这项技术都在让交互变得更加自然。</textarea>
+      </div>
+      <div class="field">
+        <span class="flabel">语速 <span class="hint">· 1.0× = 模型原始语速，播放端变速</span></span>
+        <div class="rate-wrap">
+          <div>
+            <div class="rate-track">
+              <input id="rate" type="range" min="0.75" max="1.5" step="0.001" value="1">
+              <span class="rate-ticks">
+                <span class="rate-tick" data-v="0.75" style="left:0%"></span>
+                <span class="rate-tick" data-v="1" style="left:33.333%"></span>
+                <span class="rate-tick" data-v="1.5" style="left:100%"></span>
+              </span>
+            </div>
+            <div class="rate-scale"><span>0.75× 慢</span><span class="rate-mid">1.0× 原速</span><span>1.5× 快</span></div>
+          </div>
+          <b id="rate-v">1.00× 原速</b>
+        </div>
+      </div>
+      <div class="actions">
+        <button id="go">▶ 生成并流式播放</button>
+        <button id="warm">预热模型</button>
+        <span id="play"></span>
+      </div>
+    </section>
+
+    <section class="metrics">
+      <div class="card accent"><div class="k">首帧延迟 · 页面实测</div><div class="v" id="m-ttfa">—</div><div class="note">点击 → 第一块音频到达</div></div>
+      <div class="card"><div class="k">首帧延迟 · 服务端 ttft</div><div class="v" id="m-ttft">—</div><div class="note">speech.audio.done 的 timing</div></div>
+      <div class="card"><div class="k">播放欠载（卡顿）</div><div class="v" id="m-under">—</div><div class="note">按 1× 虚拟播放时钟判定</div></div>
+      <div class="card"><div class="k">最小缓冲余量</div><div class="v" id="m-lead">—</div><div class="note">buffer 领先播放头的最小值</div></div>
+      <div class="card"><div class="k">生成实时倍数</div><div class="v" id="m-rt">—</div><div class="note">&gt;1 = 喂得饱</div></div>
+      <div class="card"><div class="k">音频时长 / 块数</div><div class="v" id="m-audio">—</div><div class="note">PCM s16le 24 kHz</div></div>
+      <div class="card log-card"><div class="k">事件日志</div><div id="log"></div></div>
+    </section>
+  </div>
+</main>
+<script>
+const SR = 24000;
+const $ = (id) => document.getElementById(id);
+const logEl = $('log');
+let ctx = null;
+let playing = false;
+
+function log(s) { logEl.textContent += s + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+function setv(id, v, cls) { const el = $(id); el.textContent = v; el.className = 'v ' + (cls || ''); }
+function b64ToInt16(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 1);
+}
+
+async function warmup() {
+  try {
+    const r = await fetch('/api?backend=' + (document.getElementById('backend-cpu').checked ? 'cpu' : 'gpu'), { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'm5-tts', input: '预热', response_format: 'pcm', stream_format: 'sse' }) });
+    if (!r.ok) throw new Error(await r.text());
+    await r.text();
+    log('预热完成');
+  } catch (e) { log('预热失败: ' + e); }
+}
+
+async function speak() {
+  if (playing) return;
+  playing = true;
+  $('go').disabled = true;
+  const text = $('text').value.trim();
+  if (!text) { playing = false; $('go').disabled = false; return; }
+  if (voiceUploadEl.checked) {
+    if (!uploadedRef) { log('请先选择参考音频文件'); playing = false; $('go').disabled = false; return; }
+    if (!refTextEl.value.trim()) { log('请填写参考音频的转写文字（克隆必需）'); playing = false; $('go').disabled = false; return; }
+    if (uploadedRef.b64.length > 6.5 * 1024 * 1024) { log('参考音频过大（server 限制 base64 ≤5MiB）'); playing = false; $('go').disabled = false; return; }
+  }
+
+  if (!ctx) ctx = new AudioContext({ sampleRate: SR });
+  if (ctx.state === 'suspended') await ctx.resume();
+
+  logEl.textContent = '';
+  setv('m-ttfa', '—'); setv('m-ttft', '—'); setv('m-under', '—'); setv('m-lead', '—'); setv('m-rt', '—');
+
+  const rate = Number(rateEl.value) || 1;
+  const backend = document.getElementById('backend-cpu').checked ? 'cpu' : 'gpu';
+  const startMs = backend === 'cpu' ? 300 : 150;  // CPU 生成余量小（~1.4× 实时），启动缓冲放宽
+  const t0 = performance.now();
+  let firstAt = null;
+  let nextTime = 0;
+  let virtualPlayhead = 0; // ms，按 1× 播放速率推进的虚拟播放头
+  let totalSamples = 0;
+  let chunks = 0;
+  let lastArrive = null;
+  let underCount = 0, underMs = 0;
+  let minLead = Infinity;
+  let ttft = null;
+
+  const req = fetch('/api?backend=' + backend, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream' },
+    body: JSON.stringify(voiceUploadEl.checked && uploadedRef && refTextEl.value.trim()
+      ? { model: 'm5-tts', input: text, response_format: 'pcm', stream_format: 'sse',
+          voice_ref: { type: 'base64', data: uploadedRef.b64 }, reference_text: refTextEl.value.trim() }
+      : { model: 'm5-tts', input: text, response_format: 'pcm', stream_format: 'sse', voice: 'default' }),
+  });
+
+  try {
+    const resp = await req;
+    if (!resp.ok) throw new Error(await resp.text());
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const evt = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of evt.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') continue;
+          let msg; try { msg = JSON.parse(data); } catch { continue; }
+          if (msg.type === 'speech.audio.delta') {
+            const pcm = b64ToInt16(msg.audio);
+            const f32 = new Float32Array(pcm.length);
+            for (let i = 0; i < pcm.length; i++) f32[i] = pcm[i] / 32768;
+            totalSamples += pcm.length;
+            chunks++;
+            const arrive = performance.now();
+            if (firstAt === null) { firstAt = arrive; }
+            const dur = f32.length / SR;
+            // 虚拟播放时钟（1×）：不依赖 AudioContext 是否真正出声，等价于真实播放时序
+            if (virtualPlayhead === 0) virtualPlayhead = arrive + startMs; // 启动缓冲按后端自适应
+            if (arrive > virtualPlayhead) { // 数据没赶上播放头 = 欠载卡顿
+              underCount++;
+              underMs += arrive - virtualPlayhead;
+              virtualPlayhead = arrive + startMs; // 欠载后重新对齐
+            }
+            virtualPlayhead += (dur * 1000) / rate;   // 播放速率越快，播放头推进越快
+            const lead = (virtualPlayhead - arrive) / 1000;
+            if (lead < minLead) minLead = lead;
+            // 真实出声（若 AudioContext 可用）；playbackRate 改变音高（磁带变速）
+            if (ctx.state === 'running') {
+              const tc = ctx.currentTime;
+              if (nextTime === 0) nextTime = tc + startMs / 1000;
+              if (tc > nextTime) nextTime = tc + 0.05;
+              const ab = ctx.createBuffer(1, f32.length, SR);
+              ab.copyToChannel(f32, 0);
+              const src = ctx.createBufferSource();
+              src.buffer = ab; src.connect(ctx.destination); src.playbackRate.value = rate; src.start(nextTime);
+              nextTime += dur / rate;
+            }
+            if (lastArrive !== null) {
+              // 到达间隔 vs 块自身时长：<1 表示生成在追赶播放
+            }
+            lastArrive = arrive;
+          } else if (msg.type === 'speech.audio.done') {
+            ttft = msg.timing && msg.timing.ttft_ms;
+          }
+        }
+      }
+    }
+    const totalMs = performance.now() - t0;
+    const audioSec = totalSamples / SR;
+    setv('m-ttfa', firstAt ? (firstAt - t0).toFixed(0) + ' ms' : '—',
+         firstAt && (firstAt - t0) < 300 ? 'ok' : 'warn');
+    setv('m-ttft', ttft != null ? ttft.toFixed(0) + ' ms' : '—');
+    setv('m-under', underCount + ' 次 / ' + underMs.toFixed(0) + ' ms',
+         underCount === 0 ? 'ok' : 'bad');
+    setv('m-lead', isFinite(minLead) ? (minLead * 1000).toFixed(0) + ' ms' : '—',
+         minLead > 0.01 ? 'ok' : 'warn');
+    setv('m-rt', (audioSec / (totalMs / 1000)).toFixed(2) + '×',
+         audioSec / (totalMs / 1000) > 1 ? 'ok' : 'bad');
+    setv('m-audio', audioSec.toFixed(2) + ' s / ' + chunks + ' 块');
+    log(`完成：${audioSec.toFixed(2)}s 音频，${chunks} 块，生成耗时 ${totalMs.toFixed(0)}ms`);
+  } catch (e) {
+    log('失败: ' + e);
+  } finally {
+    playing = false;
+    $('go').disabled = false;
+  }
+}
+
+const rateEl = $('rate');
+let uploadedRef = null; // { b64, seconds, name }
+
+const voiceDefaultEl = $('voice-default');
+const voiceUploadEl = $('voice-upload');
+const refFileEl = $('ref-file');
+const refTextEl = $('ref-text');
+const refStatusEl = $('ref-status');
+
+function setRefMode() {
+  const upload = voiceUploadEl.checked;
+  refFileEl.disabled = !upload;
+  refTextEl.disabled = !upload;
+  refStatusEl.textContent = upload
+    ? (uploadedRef ? `${uploadedRef.name}（${uploadedRef.seconds.toFixed(1)}s）` : '未选择文件')
+    : '使用服务器默认参考音色';
+}
+voiceDefaultEl.addEventListener('change', setRefMode);
+voiceUploadEl.addEventListener('change', setRefMode);
+setRefMode();
+
+function encodeWav24kMono(float32) {
+  const n = float32.length;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(buf);
+  const ws = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+  ws(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); ws(8, 'WAVE');
+  ws(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, 24000, true); v.setUint32(28, 48000, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  ws(36, 'data'); v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, float32[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+  }
+  return new Uint8Array(buf);
+}
+
+refFileEl.addEventListener('change', async () => {
+  uploadedRef = null;
+  const f = refFileEl.files && refFileEl.files[0];
+  if (!f) { setRefMode(); return; }
+  refStatusEl.textContent = '解码中…';
+  try {
+    const ab = await f.arrayBuffer();
+    const decCtx = new AudioContext({ sampleRate: 24000 });
+    const audioBuf = await decCtx.decodeAudioData(ab);
+    const mono = audioBuf.getChannelData(0);
+    const wav = encodeWav24kMono(mono);
+    let bin = '';
+    for (let i = 0; i < wav.length; i++) bin += String.fromCharCode(wav[i]);
+    uploadedRef = { b64: btoa(bin), seconds: audioBuf.duration, name: f.name };
+    await decCtx.close();
+    setRefMode();
+  } catch (e) {
+    refStatusEl.textContent = '解码失败: ' + e;
+    uploadedRef = null;
+  }
+});
+
+const RATE_STOPS = [0.75, 1, 1.5];
+function snapRate(v) {
+  let best = RATE_STOPS[0];
+  for (const s of RATE_STOPS) if (Math.abs(s - v) < Math.abs(best - v)) best = s;
+  return best;
+}
+function paintTicks(v) {
+  document.querySelectorAll('.rate-tick').forEach((el) => {
+    el.classList.toggle('active', Math.abs(Number(el.dataset.v) - v) < 1e-6);
+  });
+}
+function rateLabel(v) {
+  const n = Number(v);
+  const p = Math.round((n - 1) * 100);
+  const tag = p === 0 ? '原速' : (p < 0 ? `慢 ${-p}%` : `快 ${p}%`);
+  return n.toFixed(2) + '× ' + tag;
+}
+rateEl.addEventListener('input', () => {
+  const snapped = snapRate(Number(rateEl.value));
+  if (Math.abs(snapped - Number(rateEl.value)) > 1e-6) rateEl.value = String(snapped);
+  $('rate-v').textContent = rateLabel(snapped);
+  paintTicks(snapped);
+});
+rateEl.value = '1';
+$('rate-v').textContent = rateLabel(1);
+paintTicks(1);
+
+$('go').addEventListener('click', speak);
+$('warm').addEventListener('click', warmup);
+</script>
+</body>
+</html>
