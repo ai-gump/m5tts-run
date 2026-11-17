@@ -43,7 +43,7 @@ CPU 后端包含三项首帧优化（`--ref-cache` 参考编码缓存 / `--first
 
 | 后端 | 日志行 | 字段 |
 |---|---|---|
-| GPU（audiocpp_server） | `[M5_PERF] ...` | `frames` / `audio_ms` / `wall_ms` / `rtf`（wall÷audio）/ `realtime`（audio÷wall）/ `ttfa_ms` |
+| GPU（audiocpp_server） | `[M5_PERF] ...` | `mode=stream\|batch` / `frames` / `audio_ms` / `wall_ms` / `rtf`（wall÷audio）/ `realtime`（audio÷wall）/ `ttfa_ms`（batch 为 -1） |
 | CPU（cpu_server.py） | `[CPU_PERF] ...` | `ttft_ms` / `gen_ms` / `audio_ms` / `rtf` / `realtime` / `chunks` / `chars` / `ref_cache=hit\|miss` |
 
 启动时把 stderr 一并落盘即可长期观察：

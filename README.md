@@ -20,6 +20,7 @@ m5tts-run/
 │       └── src/
 │           ├── framework/codecs/qwen3_audio_tokenizer_decoder.cpp
 │           └── models/m5_tts/{ar.cpp, session.cpp}
+├── android/                 # 完整安卓工程（上游 M5-TTS/android 原样，含 Gradle wrapper / 打包工具 / TN 规则）
 ├── web/                     # 自建：流式播放测试台
 │   ├── tts-test.html        #   单页测试台（GPU/CPU 双后端、语速三档、六项指标）
 │   ├── proxy.py             #   同源代理（页面 + /api 路由到 gpu:8090 / cpu:8092）
@@ -41,9 +42,21 @@ m5tts-run/
 | `audio.cpp/` | — | `git clone https://github.com/0xShug0/audio.cpp.git`；再二选一：`git apply patches/02-*.patch` **或** 把 `modified/audio-cpp/` 下的文件按相同相对路径覆盖 |
 | `weights/` | 1.77GB | HF `ASLP-lab/M5-TTS-50M-ONNX` 全量 12 文件；`infer_onnx.py --model weights --local-files-only` |
 | `m5-voiceclone-f16.gguf` | 1.0GB | HF `audio-cpp/audio.cpp-gguf` → `M5-TTS-GGUF/m5-tts-50m-voiceclone-f16.gguf`（预转换，自带 codec/tokenizer） |
+| `android/models/codec_encoder.onnx` | 182MB | HF `ASLP-lab/M5-TTS-50M-ONNX` 的 `codec_encoder.onnx`；放到 `android/models/`，或构建时 `-Pm5VoiceEncoder=/绝对路径/codec_encoder.onnx` |
+| `*.m5model` | 约 1GB（自行打包） | 用 `android/package_model.py` 把 `weights/` 的 4 个 ONNX + 2 个 embedding 打成外置模型包，App 内导入 |
 | `outputs/` | — | 运行时自动生成（测试音频、JSON 统计、参考缓存） |
 
 参考音频直接用 `M5-TTS/assets/aslp_default_voice.wav`（上游自带）。
+
+## android/：完整安卓工程（上游原样）
+
+`android/` 是 [ASLP-lab/M5-TTS](https://github.com/ASLP-lab/M5-TTS) 在 commit `4e7cc91`（2026-11-12）时的 `android/` 目录**完整拷贝，未做改动**：28 个文件、约 268KB，包含 Java 源码（`app/src/main/java/com/m5/offline/`）、Gradle wrapper（`gradlew` + `gradle-wrapper.jar`）、`package_model.py` 打包工具、文本正规化规则与测试。
+
+- **构建环境**：JDK 17、Android SDK 35、Gradle 8.9 / AGP 8.7.3（工程已固定）、ONNX Runtime Android 1.23.2（Maven 拉取）；`minSdk 28`，只打 `arm64-v8a`；
+- **构建**：`cd android && ./gradlew --no-daemon -Pm5VoiceEncoder=/绝对路径/codec_encoder.onnx :app:assembleDebug`；产物 `android/app/build/outputs/apk/debug/app-debug.apk`；
+- **模型不进 APK**：主 TTS 模型用 `package_model.py` 打成外置 `.m5model`，App 内导入；APK 只内置 182MB 的参考音频 encoder（构建时按固定 SHA256 校验）；
+- **上游 README 的跨目录引用**：`android/README.md` 提到的 `../README_zh.md`、`requirements.txt` 属于 M5-TTS 仓库根，本仓库没有，需要时去上游 clone 取；
+- **未包含二开**：课堂里讨论的"语言入口 / AudioTrack 流式播放"两项修改尚未实现，这里保留可直接构建的上游基线。
 
 ## 复现步骤（M3 / macOS）
 
@@ -104,7 +117,7 @@ m5tts-run/
 
 - **GPU**：启动服务时把 stderr 落盘，每请求多一行汇总：
   `./audio.cpp/build/bin/audiocpp_server --config server-config.json --backend metal --no-ui 2>&1 | tee gpu-server.log`
-  行格式：`[M5_PERF] frames=... audio_ms=... wall_ms=... rtf=... realtime=... ttfa_ms=...`
+  行格式：`[M5_PERF] mode=stream|batch frames=... audio_ms=... wall_ms=... rtf=... realtime=... ttfa_ms=...`
 - **CPU**：`python web/cpu_server.py 2>&1 | tee cpu-server.log`
   行格式：`[CPU_PERF] ttft_ms=... gen_ms=... audio_ms=... rtf=... realtime=... chunks=... chars=... ref_cache=hit|miss`
   `ref_cache` 可用来验证参考编码缓存是否生效（首次 miss、同参考后续 hit）。

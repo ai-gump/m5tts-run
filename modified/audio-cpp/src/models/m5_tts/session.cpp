@@ -350,17 +350,18 @@ private:
             }
             if (audio.samples.size() <= 2400) throw std::runtime_error("M5-TTS generated audio is shorter than its tail trim");
             audio.samples.resize(audio.samples.size() - 2400);
-            if (streaming) {
-                // 每请求一行汇总，便于从服务端 stderr 直接核对性能（与测试页六项指标对齐）
+            {
+                // 每请求一行汇总，便于从服务端 stderr 直接核对性能（与测试页六项指标对齐）；
+                // batch 没有"首块"概念，ttfa_ms 记 -1，rtf 仍可直接对照课程实测。
                 const double wall_ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - started).count();
                 const double audio_ms = static_cast<double>(output.samples.size() + audio.samples.size()) / 24.0;
                 std::fprintf(stderr,
-                    "[M5_PERF] frames=%lld audio_ms=%.1f wall_ms=%.1f rtf=%.3f realtime=%.2f ttfa_ms=%.1f\n",
-                    static_cast<long long>(perf_frames), audio_ms, wall_ms,
+                    "[M5_PERF] mode=%s frames=%lld audio_ms=%.1f wall_ms=%.1f rtf=%.3f realtime=%.2f ttfa_ms=%.1f\n",
+                    streaming ? "stream" : "batch", static_cast<long long>(perf_frames), audio_ms, wall_ms,
                     audio_ms > 0.0 ? wall_ms / audio_ms : 0.0,
                     wall_ms > 0.0 ? audio_ms / wall_ms : 0.0,
-                    first_emit_ms);
+                    streaming ? first_emit_ms : -1.0);
             }
             output.samples.insert(output.samples.end(), audio.samples.begin(), audio.samples.end());
         }
