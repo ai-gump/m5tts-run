@@ -11,8 +11,15 @@
 ```
 m5tts-run/
 ├── patches/
-│   ├── 01-m5-tts-infer-onnx-probes-and-opts.patch   # 官方 ONNX 路线的本地改动（1 文件）
-│   └── 02-audio-cpp-m5-tts-five-knives.patch        # audio.cpp Metal 路线的本地改动（4 文件）
+│   ├── 01-m5-tts-infer-onnx-probes-and-opts.patch   # 官方 ONNX 路线的本地改动（1 文件，diff 形式）
+│   └── 02-audio-cpp-m5-tts-five-knives.patch        # audio.cpp Metal 路线的本地改动（4 文件，diff 形式）
+├── modified/                # 改后的完整文件（可直接覆盖回上游 clone；路径与上游一致）
+│   ├── m5-tts/infer_onnx.py
+│   └── audio-cpp/
+│       ├── include/engine/framework/codecs/qwen3_audio_tokenizer_runtime.h
+│       └── src/
+│           ├── framework/codecs/qwen3_audio_tokenizer_decoder.cpp
+│           └── models/m5_tts/{ar.cpp, session.cpp}
 ├── web/                     # 自建：流式播放测试台
 │   ├── tts-test.html        #   单页测试台（GPU/CPU 双后端、语速三档、六项指标）
 │   ├── proxy.py             #   同源代理（页面 + /api 路由到 gpu:8090 / cpu:8092）
@@ -30,8 +37,8 @@ m5tts-run/
 
 | 目录/文件 | 大小 | 获取方式 |
 |---|---|---|
-| `M5-TTS/` | — | `git clone https://github.com/ASLP-lab/M5-TTS.git`，然后 `git apply patches/01-*.patch` |
-| `audio.cpp/` | — | `git clone https://github.com/0xShug0/audio.cpp.git`，然后 `git apply patches/02-*.patch` |
+| `M5-TTS/` | — | `git clone https://github.com/ASLP-lab/M5-TTS.git`；再二选一：`git apply patches/01-*.patch` **或** 用 `modified/m5-tts/` 下同名文件直接覆盖 |
+| `audio.cpp/` | — | `git clone https://github.com/0xShug0/audio.cpp.git`；再二选一：`git apply patches/02-*.patch` **或** 把 `modified/audio-cpp/` 下的文件按相同相对路径覆盖 |
 | `weights/` | 1.77GB | HF `ASLP-lab/M5-TTS-50M-ONNX` 全量 12 文件；`infer_onnx.py --model weights --local-files-only` |
 | `m5-voiceclone-f16.gguf` | 1.0GB | HF `audio-cpp/audio.cpp-gguf` → `M5-TTS-GGUF/m5-tts-50m-voiceclone-f16.gguf`（预转换，自带 codec/tokenizer） |
 | `outputs/` | — | 运行时自动生成（测试音频、JSON 统计、参考缓存） |
@@ -52,7 +59,7 @@ m5tts-run/
    - 代理/页面 `python web/proxy.py` → http://127.0.0.1:8091/tts-test.html
 4. ⚠️ `server-config.json` 里的 `path` / `voice_ref` 是原作者机器的绝对路径，使用前替换成本机路径。
 
-## 两个 patch 做了什么
+## 两个 patch / modified 文件做了什么（内容一致，两种分发形式）
 
 **01（官方 ONNX 路线，`infer_onnx.py`）**
 - 分段探针：`[P_REF]` 参考编码 / `[P_EMBED]` 文本 embedding / `[P_PREFILL]` prefill / `[P_FIRSTDEC]` 首块解码；
