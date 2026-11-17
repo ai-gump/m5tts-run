@@ -66,7 +66,7 @@
 
 真机结论与 Mac 一致且更明显：**FP16 在 CPU 上是“省内存/磁盘”选项，不是提速选项**；W82 上建议保持 FP32。质量方面 FP16 多生成 3 帧（4.30s vs 4.06s），采样路径对数值扰动敏感（同精度跨设备波形相关也≈0），需要人工听感验证后才能下质量结论。完整冷/热数据见 `benchmarks/w82-eink.md`。
 
-## INT8 动态量化（2026-11-17，Mac 先行验证，Android 待设备恢复）
+## INT8 动态量化（2026-11-17，Mac 验证 + W82 真机实测）
 
 用 `onnxruntime.quantization.quantize_dynamic`（QInt8）。**先做预处理（`quant_pre_process`，需要 sympy）再量化**，否则 depth 的 692 个 MatMul 只能覆盖 52 个；预处理后 542 个。codec 的符号形状推断不完整，需 `skip_symbolic_shape=True`。
 
@@ -77,7 +77,9 @@
 | 仅 depth（A） | FP32 | INT8 | FP32 | ~940MB | **0.51** | 正常 EOS，4.14s 与 FP32 一致 | 可用 |
 | **depth+codec（C）** | FP32 | INT8 | INT8 | **693MB** | **0.456** | 正常 EOS，4.14s；与 A 波形相关 0.962 | **候选** |
 
-Mac 对照基线 FP32：RTF 0.755、首块 681ms。组合 C：RTF 0.456（**提速 1.65×**）。质量证据：时长/EOS 与 FP32 一致、RMS 相当；但与 FP32 波形相关≈0（采样路径对扰动极敏感，跨精度本就如此），**最终需人工听感**。Android 包已按组合 C 组装（`outputs/android_model_int8`，693MB），待 W82 恢复 adb 后实测。
+Mac 对照基线 FP32：RTF 0.755、首块 681ms。组合 C：RTF 0.456（**提速 1.65×**）。质量证据：时长/EOS 与 FP32 一致、RMS 相当；但与 FP32 波形相关≈0（采样路径对扰动极敏感，跨精度本就如此），**最终需人工听感**。
+
+**Android 真机结果（W82 / ORT 1.32.0，热态）**：INT8(depth+codec) 首块 2295→**1138ms（-50%）**，RTF 10.97→**6.19（提速 1.77×，单帧成本 856→487ms，与 Mac 方向一致）**，峰值 PSS 1470→914MiB，模型目录 1.1GB→694MB。**质量警告**：W82 上 INT8 生成 79 帧/6.22s（FP32 52 帧/4.06s，拖长约 50%；Mac 同组合正常），无静音尾巴但需人工听感（样本在 `benchmarks/samples/`）。完整数据见 `benchmarks/w82-eink.md`。
 
 ## 相关文件
 
