@@ -124,7 +124,7 @@
 | backbone INT8（per-channel / QUInt8 / 排除法三变体，Mac 筛） | 全部不停机（120 帧到顶）——backbone 隐状态精度损失必破 EOS | 放弃，backbone 永远 FP32 |
 | 8 线程 | 基线期仅 +3%（大小核拖后腿 + 小矩阵喂不饱 + 带宽共享），INT8 未再复测 | 维持 4 线程 |
 
-要真正破 1，只剩换执行单元：Kirin 990 NPU/NNAPI（未验证，动态形状存疑）、更新的 SoC、或更小模型；0.90× 实时倍数下 AudioTrack 缓冲能抗短文本，长文本会累积落后。
+要真正破 1，只剩换执行单元。**Kirin 990 的达芬奇 NPU 已在本机探测排除（2026-11-17 20:2x，EMUI 14.2）**：`service list` 无 neural 服务、`pm list features` 无 neuralnetworks/HIAI feature（0 个）、`/vendor|/system/lib64/hw` 无 neuralnetworks HAL（0 个）、全盘搜 `*hiai*/*npu*` 无公开 DDK 运行库——NPU 只给华为系统应用用，不对第三方 App 开放（HiAI DDK 对三方开放是 970/980 时代的旧事，且那也要求离线模型转换）。即便有入口，自回归动态 shape 也会被 NNAPI 整图打回 CPU。剩余选项：更新的 SoC（骁龙 8 系/QNN、Apple ANE/CoreML，均需静态化 KV 的适配工作）、更小模型、或接受 0.90× 挂 AudioTrack 缓冲（短文本听感接近实时，长文本累积落后）。
 
 ## 备注与未决项
 
