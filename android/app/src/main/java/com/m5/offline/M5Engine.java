@@ -21,7 +21,7 @@ public final class M5Engine implements AutoCloseable {
         Arrays.asList("Chinese", "English", "German", "French", "Japanese", "Korean"));
     private static final int TAIL_SAMPLES = 2400; // 100 ms，段尾修剪
     private static final int FIRST_CHUNK_FRAMES = 1; // 首块 1 帧 ≈ 80 ms 音频，压低 TTFA
-    private static final int CHUNK_FRAMES = 8;       // 之后 8 帧一块，减少解码调用次数
+    private static final int CHUNK_FRAMES = 8;       // 之后 8 帧一块；实测 16 帧块在 Kirin 990 上更慢（codec 2979→3153ms）
     private static final int PRIME_CHUNK_FRAMES = 32;
 
     public static final class Voice {
