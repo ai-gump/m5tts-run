@@ -6,6 +6,9 @@ import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.graphics.Typeface;
+import android.media.AudioAttributes;
+import android.media.AudioFormat;
+import android.media.AudioTrack;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.*;
@@ -30,12 +33,13 @@ public final class MainActivity extends Activity {
     private final JSONObject diagnostics = new JSONObject();
     private TextView status, modelStatus, result;
     private TextView tnPreview;
+    private TextView perf;
     private CheckBox tnEnabled;
     private Spinner numberMode;
     private TextNormalizer normalizer;
     private String normalizedPreview = "";
     private EditText text;
-    private Spinner voices, threads;
+    private Spinner voices, threads, language;
     private Button importButton, generateButton, cancelButton, playButton, saveButton;
     private Button addVoiceButton, importVoiceButton, exportVoiceButton, deleteVoiceButton;
     private List<VoiceStore.Entry> voiceEntries = new ArrayList<>();
@@ -45,9 +49,12 @@ public final class MainActivity extends Activity {
     private M5Engine engine;
     private int loadedThreads;
     private MediaPlayer player;
+    private AudioTrack audioTrack;
     private long lastPssSample;
     private long peakPssKb;
     private File modelRoot, audioFile, voiceRoot;
+    private static final String[] LANGUAGE_CODES =
+        {"Chinese", "English", "German", "French", "Japanese", "Korean"};
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -84,6 +91,18 @@ public final class MainActivity extends Activity {
         exportVoiceButton = button(voiceTools, "导出音色", v -> exportVoice());
         deleteVoiceButton = button(voiceTools, "删除音色", v -> deleteVoice());
         label(content, "新增音色：选择 1–30 秒的单人录音，填写录音原文，在手机上离线创建。", 12, false);
+        label(content, "语言", 15, true);
+        language = new Spinner(this);
+        language.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
+            new String[]{"中文 Chinese", "English", "Deutsch", "Français", "日本語", "한국어"}));
+        language.setSelection(state == null ? 0 : state.getInt("language", 0));
+        language.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(android.widget.AdapterView<?> p, View v, int i, long id) {
+                updateTnAvailability(); updateTnPreview();
+            }
+            @Override public void onNothingSelected(android.widget.AdapterView<?> p) { }
+        });
+        content.addView(language);
         label(content, "生成速度", 15, true);
         threads = new Spinner(this);
         threads.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
@@ -91,12 +110,13 @@ public final class MainActivity extends Activity {
         threads.setSelection(1); content.addView(threads);
         gap(content, 12); label(content, "要合成的文字", 15, true);
         text = new EditText(this); text.setTextSize(17); text.setMinLines(4); text.setMaxLines(10);
-        text.setGravity(Gravity.TOP); text.setHint("输入中文，最多 2000 字");
+        text.setGravity(Gravity.TOP); text.setHint("输入要合成的文字，最多 2000 字");
         text.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_MULTI_LINE);
         text.setText(state == null ? "你好，这是在手机上运行的离线语音合成测试。" : state.getString("text", ""));
         content.addView(text, new LinearLayout.LayoutParams(-1, -2));
         tnEnabled = new CheckBox(this); tnEnabled.setText("文本规范化 TN");
         tnEnabled.setChecked(state == null || state.getBoolean("tn", true)); content.addView(tnEnabled);
+        updateTnAvailability();
         numberMode = new Spinner(this);
         numberMode.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item,
             new String[]{"数字读法 · 自动", "普通数字 · 按数值", "普通数字 · 逐位读"}));
@@ -121,6 +141,10 @@ public final class MainActivity extends Activity {
         progress = new ProgressBar(this); content.addView(progress);
         status = label(content, "准备就绪", 15, false);
         result = label(content, "", 14, false);
+        gap(content, 10); label(content, "性能指标", 15, true);
+        perf = label(content, "生成后显示：首块延迟 / 生成耗时 / RTF / 实时倍数 / 峰值内存", 12, false);
+        perf.setTypeface(Typeface.MONOSPACE);
+        perf.setTextIsSelectable(true);
         LinearLayout actions = new LinearLayout(this); content.addView(actions);
         playButton = button(actions, "播放", v -> play());
         saveButton = button(actions, "保存 WAV", v -> {
@@ -148,11 +172,28 @@ public final class MainActivity extends Activity {
     }
 
     private String numberMode() { return new String[]{"auto", "cardinal", "digits"}[numberMode.getSelectedItemPosition()]; }
+    private String selectedLanguage() {
+        int index = language == null ? 0 : language.getSelectedItemPosition();
+        return LANGUAGE_CODES[Math.max(0, Math.min(LANGUAGE_CODES.length - 1, index))];
+    }
+    private boolean tnAvailable() {
+        String lang = selectedLanguage();
+        return lang.equals("Chinese") || lang.equals("English");
+    }
+    private void updateTnAvailability() {
+        if (tnEnabled == null) return;
+        boolean available = tnAvailable();
+        tnEnabled.setEnabled(!busy && available);
+        tnEnabled.setText(available ? "文本规范化 TN" : "文本规范化 TN（当前语言暂不支持）");
+    }
     private void updateTnPreview() {
-        if (normalizer == null || tnPreview == null) return;
+        if (normalizer == null || tnPreview == null || text == null || numberMode == null) return;
         try {
-            normalizedPreview = normalizer.normalize(text.getText().toString(), tnEnabled.isChecked(), numberMode(), "Chinese").text;
-            tnPreview.setText("实际合成文本（点击查看全文）：\n" + normalizedPreview);
+            boolean useTn = tnEnabled.isChecked() && tnAvailable();
+            String lang = tnAvailable() ? selectedLanguage() : "Chinese";
+            normalizedPreview = normalizer.normalize(text.getText().toString(), useTn, numberMode(), lang).text;
+            tnPreview.setText((useTn ? "实际合成文本（点击查看全文）：\n" : "当前语言暂不支持 TN，实际合成文本：\n")
+                + normalizedPreview);
         } catch (IllegalArgumentException e) { normalizedPreview = ""; tnPreview.setText(e.getMessage()); }
     }
 
@@ -395,39 +436,87 @@ public final class MainActivity extends Activity {
         final String value = text.getText().toString();
         try { M5Engine.splitText(value); } catch (IllegalArgumentException e) { status.setText(e.getMessage()); return; }
         if (normalizer == null) { status.setText("TN 规则未加载，请重新安装 APK。"); return; }
-        final boolean useTn = tnEnabled.isChecked(); final String mode = numberMode();
+        final String lang = selectedLanguage();
+        final boolean useTn = tnEnabled.isChecked() && tnAvailable();
+        final String tnLang = tnAvailable() ? lang : "Chinese";
+        final String mode = numberMode();
         final long normalizeStart = System.nanoTime(); final TextNormalizer.Result prepared;
         try {
-            prepared = normalizer.normalize(value, useTn, mode, "Chinese");
+            prepared = normalizer.normalize(value, useTn, mode, tnLang);
             if (prepared.text.codePointCount(0, prepared.text.length()) > 2000) throw new IllegalArgumentException("TN 展开后超过 2000 字，请缩短文本。");
         } catch (IllegalArgumentException e) { status.setText(e.getMessage()); return; }
         final double normalizeMs = (System.nanoTime() - normalizeStart) / 1e6;
+        final int chars = value.codePointCount(0, value.length());
         final VoiceStore.Entry voice = selectedVoice();
         if (voice == null) { status.setText("请先导入模型并选择音色。"); return; }
         final int threadCount = new int[]{2,4,8}[threads.getSelectedItemPosition()];
-        releasePlayer(); begin(); result.setText("");
+        releasePlayer(); begin(); result.setText(""); perf.setText("生成中…");
         worker.execute(() -> {
             File pending = new File(getFilesDir(), "m5-generating.wav");
+            double loadMs = 0;
+            boolean streaming = false;
             try {
-                synchronized (diagnostics) { diagnostics.put("threads", threadCount); diagnostics.remove("error"); }
+                synchronized (diagnostics) {
+                    diagnostics.put("threads", threadCount); diagnostics.remove("error");
+                    diagnostics.put("lang", lang); diagnostics.put("chars", chars);
+                }
                 synchronized (diagnostics) {
                     diagnostics.put("tn_enabled", useTn); diagnostics.put("tn_mode", mode); diagnostics.put("tn_changed", prepared.changed);
                     diagnostics.put("tn_version", prepared.version); diagnostics.put("tn_elapsed_ms", normalizeMs);
                 }
                 if (engine != null && loadedThreads != threadCount) { closeEngine(); System.gc(); }
-                if (engine == null) { engine = new M5Engine(modelRoot, threadCount, this::updateStatus); loadedThreads = threadCount; }
-                M5Engine.Synthesis synthesis = engine.synthesize(prepared.text, voice.voice, 1234, pending, cancelled, this::updateStatus);
-                Files.move(pending.toPath(), audioFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                synchronized (diagnostics) {
-                    diagnostics.put("elapsed_s", synthesis.elapsedSeconds); diagnostics.put("audio_s", synthesis.audioSeconds);
-                    diagnostics.put("rtf", synthesis.elapsedSeconds / synthesis.audioSeconds); diagnostics.put("segments", synthesis.segments);
+                if (engine == null) {
+                    long loadStart = System.nanoTime();
+                    engine = new M5Engine(modelRoot, threadCount, this::updateStatus);
+                    loadedThreads = threadCount;
+                    loadMs = (System.nanoTime() - loadStart) / 1e6;
                 }
+                synchronized (diagnostics) { diagnostics.put("load_ms", loadMs); }
+                streaming = startAudioTrack();
+                final boolean stream = streaming;
+                synchronized (diagnostics) { diagnostics.put("streaming", stream); }
+                android.util.Log.i("M5Perf", String.format(Locale.ROOT,
+                    "[M5_REQ] lang=%s threads=%d chars=%d tn=%s streaming=%s",
+                    lang, threadCount, chars, useTn, stream));
+                M5Engine.Synthesis synthesis = engine.synthesize(prepared.text, voice.voice, lang, 1234,
+                    pending, cancelled, this::updateStatus, stream ? this::writePcm : null);
+                stopAudioTrack(false);
+                Files.move(pending.toPath(), audioFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                final double genMs = synthesis.elapsedSeconds * 1000, audioMs = synthesis.audioSeconds * 1000;
+                final double rtf = audioMs > 0 ? genMs / audioMs : 0;
+                final double realtime = genMs > 0 ? audioMs / genMs : 0;
+                final double peakMiB = peakPssKb / 1024.0;
+                final double load = loadMs;
+                synchronized (diagnostics) {
+                    diagnostics.put("elapsed_s", synthesis.elapsedSeconds); diagnostics.put("wall_s", synthesis.wallSeconds);
+                    diagnostics.put("audio_s", synthesis.audioSeconds); diagnostics.put("rtf", rtf);
+                    diagnostics.put("realtime", realtime); diagnostics.put("segments", synthesis.segments);
+                    diagnostics.put("frames", synthesis.frames); diagnostics.put("first_chunk_ms", synthesis.firstChunkSeconds * 1000);
+                    diagnostics.put("peak_pss_mib", peakMiB);
+                }
+                android.util.Log.i("M5Perf", String.format(Locale.ROOT,
+                    "[M5_PERF] lang=%s threads=%d chars=%d segments=%d audio_ms=%.0f gen_ms=%.0f wall_ms=%.0f " +
+                    "rtf=%.3f realtime=%.2f first_chunk_ms=%.0f load_ms=%.0f peak_pss_mib=%.0f streaming=%s tn=%s",
+                    lang, threadCount, chars, synthesis.segments, audioMs, genMs, synthesis.wallSeconds * 1000,
+                    rtf, realtime, synthesis.firstChunkSeconds * 1000, load, peakMiB, stream, useTn));
                 ui(() -> {
-                    result.setText(String.format(Locale.CHINA, "语音 %.1f 秒 · 合成耗时 %.1f 秒", synthesis.audioSeconds, synthesis.elapsedSeconds));
-                    status.setText("生成完成，可以播放或保存。");
+                    result.setText(String.format(Locale.CHINA, "语音 %.1f 秒 · 生成 %.1f 秒 · 实时 %.2f×",
+                        synthesis.audioSeconds, synthesis.elapsedSeconds, realtime));
+                    perf.setText(String.format(Locale.CHINA,
+                        "首块延迟  %s\n生成耗时  %.2f s · 音频 %.2f s\nRTF %.3f · 实时 %.2f×\n峰值内存  %.0f MiB · %d 线程 · %s%s",
+                        synthesis.firstChunkSeconds >= 0
+                            ? String.format(Locale.CHINA, "%.0f ms", synthesis.firstChunkSeconds * 1000)
+                            : "—（未流式）",
+                        synthesis.elapsedSeconds, synthesis.audioSeconds, rtf, realtime, peakMiB, threadCount, lang,
+                        load > 0 ? String.format(Locale.CHINA, "\n模型加载  %.0f ms（本次首次加载）", load) : ""));
+                    status.setText(stream ? "生成完成，已边生成边播放；可回放或保存。" : "生成完成，可以播放或保存。");
                 });
-            } catch (Exception | OutOfMemoryError e) { failure(e); closeEngine(); System.gc(); }
-            finally { try { Files.deleteIfExists(pending.toPath()); } catch (IOException ignored) { } finishWork(); }
+            } catch (Exception | OutOfMemoryError e) { stopAudioTrack(true); failure(e); closeEngine(); System.gc(); }
+            finally {
+                stopAudioTrack(cancelled.get());
+                try { Files.deleteIfExists(pending.toPath()); } catch (IOException ignored) { }
+                finishWork();
+            }
         });
     }
     private void play() {
@@ -439,16 +528,66 @@ public final class MainActivity extends Activity {
         } catch (IOException e) { failure(e); }
     }
     private void releasePlayer() { if (player != null) { player.release(); player = null; } }
+    /** 流式播放：生成线程边解码边写入 AudioTrack；失败则退回整段生成。 */
+    private boolean startAudioTrack() {
+        stopAudioTrack(true);
+        try {
+            int min = AudioTrack.getMinBufferSize(24000, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+            if (min <= 0) throw new IOException("设备不支持 24 kHz 单声道 AudioTrack");
+            int bytes = Math.max(min * 2, 24000 * 2 * 2); // 至少约 2 秒，手机生成慢时抗欠载
+            audioTrack = new AudioTrack.Builder()
+                .setAudioAttributes(new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                .setAudioFormat(new AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(24000)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                .setBufferSizeInBytes(bytes)
+                .setTransferMode(AudioTrack.MODE_STREAM).build();
+            if (audioTrack.getState() != AudioTrack.STATE_INITIALIZED) throw new IOException("AudioTrack 初始化失败");
+            audioTrack.play();
+            android.util.Log.i("M5Perf", "[M5_AUDIO] track=on buffer_ms=" + bytes / 48);
+            return true;
+        } catch (Exception e) {
+            android.util.Log.w("M5Perf", "[M5_AUDIO] track=off " + e);
+            stopAudioTrack(true);
+            return false;
+        }
+    }
+    private void writePcm(float[] samples, int offset, int count) {
+        AudioTrack track = audioTrack;
+        if (track == null) return;
+        short[] pcm = new short[count];
+        for (int i = 0; i < count; i++) {
+            float value = samples[offset + i];
+            pcm[i] = (short) Math.max(-32768, Math.min(32767, Math.round(value * 32767f)));
+        }
+        int written = track.write(pcm, 0, count);
+        if (written < 0) android.util.Log.w("M5Perf", "[M5_AUDIO] write=" + written);
+    }
+    private void stopAudioTrack(boolean discard) {
+        AudioTrack track = audioTrack;
+        audioTrack = null;
+        if (track == null) return;
+        try {
+            if (discard) { track.pause(); track.flush(); }
+            else track.stop();
+        } catch (Exception ignored) { }
+        try { track.release(); } catch (Exception ignored) { }
+    }
     private void closeEngine() { if (engine != null) { engine.close(); engine = null; } }
     private void begin() {
-        releasePlayer(); cancelled.set(false);
+        releasePlayer(); stopAudioTrack(true); cancelled.set(false);
+        peakPssKb = Debug.getPss(); lastPssSample = 0;
         synchronized (diagnostics) { diagnostics.remove("error"); }
         setBusy(true);
     }
     private void finishWork() { ui(() -> setBusy(false)); }
     private void setBusy(boolean value) {
-        busy = value; importButton.setEnabled(!value); text.setEnabled(!value); voices.setEnabled(!value); threads.setEnabled(!value);
-        tnEnabled.setEnabled(!value); numberMode.setEnabled(!value);
+        busy = value; importButton.setEnabled(!value); text.setEnabled(!value); voices.setEnabled(!value);
+        threads.setEnabled(!value); language.setEnabled(!value); numberMode.setEnabled(!value);
+        updateTnAvailability();
         updateVoiceButtons();
         generateButton.setEnabled(!value && new File(modelRoot, "bundle.json").isFile());
         playButton.setEnabled(!value && audioFile.isFile()); saveButton.setEnabled(!value && audioFile.isFile());
@@ -487,9 +626,11 @@ public final class MainActivity extends Activity {
     }
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putString("text", text.getText().toString()); state.putBoolean("tn", tnEnabled.isChecked());
-        state.putInt("number_mode", numberMode.getSelectedItemPosition()); super.onSaveInstanceState(state);
+        state.putInt("number_mode", numberMode.getSelectedItemPosition());
+        state.putInt("language", language.getSelectedItemPosition()); super.onSaveInstanceState(state);
     }
     @Override protected void onDestroy() {
-        destroyed = true; cancelled.set(true); releasePlayer(); worker.execute(this::closeEngine); worker.shutdown(); super.onDestroy();
+        destroyed = true; cancelled.set(true); releasePlayer(); stopAudioTrack(true);
+        worker.execute(this::closeEngine); worker.shutdown(); super.onDestroy();
     }
 }

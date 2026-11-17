@@ -48,15 +48,21 @@ m5tts-run/
 
 参考音频直接用 `M5-TTS/assets/aslp_default_voice.wav`（上游自带）。
 
-## android/：完整安卓工程（上游原样）
+## android/：完整安卓工程（上游基线 + 本地二开）
 
-`android/` 是 [ASLP-lab/M5-TTS](https://github.com/ASLP-lab/M5-TTS) 在 commit `4e7cc91`（2026-11-12）时的 `android/` 目录**完整拷贝，未做改动**：28 个文件、约 268KB，包含 Java 源码（`app/src/main/java/com/m5/offline/`）、Gradle wrapper（`gradlew` + `gradle-wrapper.jar`）、`package_model.py` 打包工具、文本正规化规则与测试。
+`android/` 以 [ASLP-lab/M5-TTS](https://github.com/ASLP-lab/M5-TTS) commit `4e7cc91`（2026-11-12）的 `android/` 目录为基线，完整保留 28 个原始文件（Java 源码、Gradle wrapper、`package_model.py`、文本正规化规则与测试），并做了三处本地改动：
+
+- **六语言选择**：UI 增加语言下拉（Chinese / English / German / French / Japanese / Korean），`M5Engine.conditioned()` 参数化，不再写死 `Chinese`；
+- **流式播放**：生成线程每 4 帧解码一次，`AudioTrack` 边生成边播；段尾仍保留 100ms 修剪，同时持续写 WAV 供回放/保存；
+- **性能观测**：UI 底部「性能指标」显示首块延迟、生成耗时、RTF、实时倍数、峰值内存；每请求向 logcat 打 `[M5_LOAD]` / `[M5_TTFA]` / `[M5_SEG]` / `[M5_PERF]`（`adb logcat -s M5Perf`）。
+
+其余构建事项：
 
 - **构建环境**：JDK 17、Android SDK 35、Gradle 8.9 / AGP 8.7.3（工程已固定）、ONNX Runtime Android 1.23.2（Maven 拉取）；`minSdk 28`，只打 `arm64-v8a`；
 - **构建**：`cd android && ./gradlew --no-daemon -Pm5VoiceEncoder=/绝对路径/codec_encoder.onnx :app:assembleDebug`；产物 `android/app/build/outputs/apk/debug/app-debug.apk`；
 - **模型不进 APK**：主 TTS 模型用 `package_model.py` 打成外置 `.m5model`，App 内导入；APK 只内置 182MB 的参考音频 encoder（构建时按固定 SHA256 校验）；
 - **上游 README 的跨目录引用**：`android/README.md` 提到的 `../README_zh.md`、`requirements.txt` 属于 M5-TTS 仓库根，本仓库没有，需要时去上游 clone 取；
-- **未包含二开**：课堂里讨论的"语言入口 / AudioTrack 流式播放"两项修改尚未实现，这里保留可直接构建的上游基线。
+- **TN 边界**：Java 版文本规范化只覆盖中文/英文，选日/韩/德/法时自动跳过 TN。详见 `android/README.md` 的《性能观测》。
 
 ## 复现步骤（M3 / macOS）
 

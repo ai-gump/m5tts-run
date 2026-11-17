@@ -1,6 +1,7 @@
 package com.m5.offline;
 
 import ai.onnxruntime.*;
+import android.util.Log;
 import org.json.*;
 import java.io.*;
 import java.nio.*;
@@ -8,10 +9,19 @@ import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** CPU-only, non-streaming port of m5_onnx/runtime.py. Single worker owns an instance. */
+/** CPU-only ONNX port of m5_onnx/runtime.py. Single worker owns an instance. */
 public final class M5Engine implements AutoCloseable {
     public interface Progress { void update(String message); }
     public interface NoiseSource { void fill(FloatBuffer buffer) throws IOException; }
+    /** 流式 PCM 接收端（AudioTrack / 文件 / 测试桩），在生成线程回调。 */
+    public interface AudioSink { void write(float[] samples, int offset, int count) throws Exception; }
+    private interface FrameSink { void onFrame(long[] frame, int index) throws Exception; }
+
+    public static final List<String> LANGUAGES = Collections.unmodifiableList(
+        Arrays.asList("Chinese", "English", "German", "French", "Japanese", "Korean"));
+    private static final int TAIL_SAMPLES = 2400; // 100 ms，段尾修剪
+    private static final int CHUNK_FRAMES = 4;    // 首块 4 帧 ≈ 320 ms 音频
+
     public static final class Voice {
         public final String name, referenceText;
         final long[][] codes;
@@ -34,10 +44,20 @@ public final class M5Engine implements AutoCloseable {
         }
         public String toString() { return name; }
     }
+
     public static final class Synthesis {
-        public final double elapsedSeconds, audioSeconds;
-        public final int segments;
-        Synthesis(double elapsed, double audio, int count) { elapsedSeconds = elapsed; audioSeconds = audio; segments = count; }
+        /** 纯生成/解码耗时（不含 AudioTrack 写入阻塞）。 */
+        public final double elapsedSeconds;
+        /** 请求总墙钟（含播放端阻塞）。 */
+        public final double wallSeconds;
+        public final double audioSeconds;
+        /** 首块 PCM 就绪时间；非流式或未出声时为 -1。 */
+        public final double firstChunkSeconds;
+        public final int segments, frames;
+        Synthesis(double elapsed, double wall, double audio, double firstChunk, int count, int frames) {
+            elapsedSeconds = elapsed; wallSeconds = wall; audioSeconds = audio;
+            firstChunkSeconds = firstChunk; segments = count; this.frames = frames;
+        }
     }
 
     private final OrtEnvironment env = OrtEnvironment.getEnvironment();
@@ -49,6 +69,7 @@ public final class M5Engine implements AutoCloseable {
 
     public M5Engine(File root, int threads, Progress progress) throws Exception {
         if (threads < 1 || threads > 8) throw new IllegalArgumentException("线程数需要为 1–8");
+        long loadStart = System.nanoTime();
         try {
             meta = json(new File(root, "manifest.json")); codecMeta = json(new File(root, "codec_cached.json"));
             if (!"m5-llama-rq16-qwen3-12hz".equals(meta.getString("architecture")) ||
@@ -79,20 +100,25 @@ public final class M5Engine implements AutoCloseable {
                 codec = env.createSession(new File(root, "codec_decoder_cached.onnx").getPath(), options);
             }
         } catch (Exception | OutOfMemoryError e) { close(); throw e; }
+        Log.i("M5Perf", String.format(Locale.ROOT, "[M5_LOAD] threads=%d load_ms=%.0f",
+            threads, (System.nanoTime() - loadStart) / 1e6));
     }
 
     public List<Voice> voices() { return Collections.unmodifiableList(voices); }
     public static JSONObject json(File path) throws IOException, JSONException {
         return new JSONObject(new String(Files.readAllBytes(path.toPath()), java.nio.charset.StandardCharsets.UTF_8));
     }
-    public static String conditioned(String reference, String text) {
+
+    public static String conditioned(String reference, String text, String language) {
+        if (!LANGUAGES.contains(language)) throw new IllegalArgumentException("不支持的语言：" + language);
         String combined = reference.trim() + text.trim();
         for (String token : new String[]{"<|caption_begin|>", "<|caption_end|>", "<|accent_begin|>",
             "<|accent_end|>", "<|speaker_start|>", "<|speaker_end|>", "<|lang_begin|>", "<|lang_end|>"})
             if (combined.contains(token)) throw new IllegalArgumentException("文本包含保留的控制标记");
         return "<|caption_begin|><|caption_end|><|accent_begin|><|accent_end|>" +
-            "<|speaker_start|>None<|speaker_end|><|lang_begin|>Chinese<|lang_end|>" + combined;
+            "<|speaker_start|>None<|speaker_end|><|lang_begin|>" + language + "<|lang_end|>" + combined;
     }
+    public static String conditioned(String reference, String text) { return conditioned(reference, text, "Chinese"); }
 
     public Synthesis synthesize(String text, int voiceIndex, long seed, File output,
                                 AtomicBoolean cancelled, Progress progress) throws Exception {
@@ -102,10 +128,19 @@ public final class M5Engine implements AutoCloseable {
     public Synthesis synthesize(String text, Voice voice, long seed, File output,
                                 AtomicBoolean cancelled, Progress progress) throws Exception {
         Random random = new Random(seed);
-        return synthesize(text, voice, output, cancelled, progress, buffer -> {
+        return synthesize(text, voice, "Chinese", output, cancelled, progress, buffer -> {
             for (int i = 0; i < buffer.capacity(); i++)
                 buffer.put(i, Math.max((float) -Math.log(1.0 - random.nextDouble()), Float.MIN_NORMAL));
-        });
+        }, null);
+    }
+    /** 带语言与流式回调的入口：sink 为 null 时退回“整段生成后再解码”。 */
+    public Synthesis synthesize(String text, Voice voice, String language, long seed, File output,
+                                AtomicBoolean cancelled, Progress progress, AudioSink sink) throws Exception {
+        Random random = new Random(seed);
+        return synthesize(text, voice, language, output, cancelled, progress, buffer -> {
+            for (int i = 0; i < buffer.capacity(); i++)
+                buffer.put(i, Math.max((float) -Math.log(1.0 - random.nextDouble()), Float.MIN_NORMAL));
+        }, sink);
     }
 
     public Synthesis synthesize(String text, int voiceIndex, File output, AtomicBoolean cancelled,
@@ -115,29 +150,69 @@ public final class M5Engine implements AutoCloseable {
     }
     public Synthesis synthesize(String text, Voice voice, File output, AtomicBoolean cancelled,
                                 Progress progress, NoiseSource noiseSource) throws Exception {
+        return synthesize(text, voice, "Chinese", output, cancelled, progress, noiseSource, null);
+    }
+
+    public Synthesis synthesize(String text, Voice voice, String language, File output, AtomicBoolean cancelled,
+                                Progress progress, NoiseSource noiseSource, AudioSink sink) throws Exception {
         if (voice == null) throw new IllegalArgumentException("请选择音色");
+        if (!LANGUAGES.contains(language)) throw new IllegalArgumentException("不支持的语言：" + language);
         List<String> segments = splitText(text);
-        long start = System.nanoTime(); double duration;
+        long start = System.nanoTime();
+        double duration, firstChunk = -1;
+        long sinkNanos = 0; int framesTotal = 0;
         boolean success = false;
         try (WavWriter wav = new WavWriter(output)) {
             for (int i = 0; i < segments.size(); i++) {
                 check(cancelled);
                 final String prefix = "第 " + (i + 1) + "/" + segments.size() + " 段：";
-                long[][] generated = generate(segments.get(i), voice, cancelled,
-                    message -> progress.update(prefix + message), noiseSource);
-                progress.update(prefix + "正在转换成声音…");
-                decode(voice.codes, generated, wav, cancelled);
+                long segStart = System.nanoTime();
+                double segAudioStart = wav.duration();
+                if (sink != null) {
+                    try (StreamingDecoder decoder = new StreamingDecoder(
+                            voice.codes, wav, sink, cancelled, start)) {
+                        long[][] generated = generate(segments.get(i), voice, language, cancelled,
+                            message -> progress.update(prefix + message), noiseSource, decoder);
+                        decoder.finish();
+                        framesTotal += generated.length;
+                        sinkNanos += decoder.sinkNanos();
+                        if (firstChunk < 0 && decoder.firstChunkSeconds() >= 0) firstChunk = decoder.firstChunkSeconds();
+                        logSegment(i, segments.size(), generated.length, segStart, segAudioStart, wav,
+                            decoder.sinkNanos());
+                    }
+                } else {
+                    long[][] generated = generate(segments.get(i), voice, language, cancelled,
+                        message -> progress.update(prefix + message), noiseSource, null);
+                    progress.update(prefix + "正在转换成声音…");
+                    decode(voice.codes, generated, wav, cancelled);
+                    framesTotal += generated.length;
+                    logSegment(i, segments.size(), generated.length, segStart, segAudioStart, wav, 0);
+                }
             }
             duration = wav.duration();
             if (duration <= 0) throw new IOException("模型没有生成有效音频");
             success = true;
         } finally { if (!success) Files.deleteIfExists(output.toPath()); }
-        return new Synthesis((System.nanoTime() - start) / 1e9, duration, segments.size());
+        long end = System.nanoTime();
+        double wall = (end - start) / 1e9;
+        double compute = Math.max(0, end - start - sinkNanos) / 1e9;
+        if (firstChunk >= 0) Log.i("M5Perf", String.format(Locale.ROOT,
+            "[M5_TTFA] first_chunk_ms=%.0f", firstChunk * 1000));
+        return new Synthesis(compute, wall, duration, firstChunk, segments.size(), framesTotal);
     }
 
-    private long[][] generate(String text, Voice voice, AtomicBoolean cancelled,
-                              Progress progress, NoiseSource source) throws Exception {
-        long[] ids = tokenizer.encode(conditioned(voice.referenceText, text));
+    private void logSegment(int index, int total, int frames, long segStart, double audioStart,
+                            WavWriter wav, long sinkNanos) {
+        double gen = (System.nanoTime() - segStart - sinkNanos) / 1e9;
+        double audio = wav.duration() - audioStart;
+        Log.i("M5Perf", String.format(Locale.ROOT,
+            "[M5_SEG] index=%d/%d frames=%d audio_ms=%.0f gen_ms=%.0f rtf=%.3f",
+            index + 1, total, frames, audio * 1000, gen * 1000, audio > 0 ? gen / audio : 0));
+    }
+
+    private long[][] generate(String text, Voice voice, String language, AtomicBoolean cancelled,
+                              Progress progress, NoiseSource source, FrameSink sink) throws Exception {
+        long[] ids = tokenizer.encode(conditioned(voice.referenceText, text, language));
         int maxFrames = 500, length = ids.length + voice.codes.length;
         if (length + maxFrames > meta.getInt("max_sequence")) throw new IOException("文本或参考音色过长，请缩短后重试");
         FloatBuffer prefix = floats(length * 512);
@@ -182,12 +257,89 @@ public final class M5Engine implements AutoCloseable {
                     return generated.toArray(new long[0][]);
                 }
                 generated.add(frame);
+                if (sink != null) sink.onFrame(frame, generated.size());
                 if (step % 8 == 0) progress.update(String.format(Locale.CHINA, "已生成 %.1f 秒语音", generated.size() * 0.08));
             }
             throw new IOException("此段超过 40 秒生成上限，请缩短文本后重试");
         } finally {
             if (previousBackbone != null) previousBackbone.close();
             if (previousDepth != null) previousDepth.close();
+        }
+    }
+
+    /** 边生成边解码：每 4 帧进解码器，吐出时保留末尾 100 ms，段尾丢弃。 */
+    private final class StreamingDecoder implements FrameSink, AutoCloseable {
+        private final CodecState state;
+        private final WavWriter wav;
+        private final AudioSink sink;
+        private final AtomicBoolean cancelled;
+        private final long startNanos;
+        private final List<long[]> buffered = new ArrayList<>();
+        private float[] pending = new float[16384];
+        private int pendingCount;
+        private long sinkNanos;
+        private double firstChunkSeconds = -1;
+        private boolean closed;
+
+        StreamingDecoder(long[][] reference, WavWriter wav, AudioSink sink,
+                         AtomicBoolean cancelled, long startNanos) throws Exception {
+            this.wav = wav; this.sink = sink; this.cancelled = cancelled; this.startNanos = startNanos;
+            state = new CodecState();
+            try {
+                for (int start = 0; start < reference.length; start += 16) {
+                    check(cancelled);
+                    state.run(reference, start, Math.min(16, reference.length - start));
+                }
+            } catch (Exception e) { state.close(); throw e; }
+        }
+
+        public void onFrame(long[] frame, int index) throws Exception {
+            check(cancelled);
+            buffered.add(frame);
+            if (buffered.size() >= CHUNK_FRAMES) flushChunk();
+        }
+
+        private void flushChunk() throws Exception {
+            if (buffered.isEmpty()) return;
+            long[][] chunk = buffered.toArray(new long[0][]);
+            buffered.clear();
+            FloatBuffer pcm = state.run(chunk, 0, chunk.length);
+            int count = pcm.remaining();
+            if (pendingCount + count > pending.length)
+                pending = Arrays.copyOf(pending, Math.max(pending.length * 2, pendingCount + count));
+            pcm.get(pending, pendingCount, count);
+            pendingCount += count;
+            emitAvailable();
+        }
+
+        private void emitAvailable() throws Exception {
+            int emit = pendingCount - TAIL_SAMPLES;
+            if (emit <= 0) return;
+            if (firstChunkSeconds < 0) firstChunkSeconds = (System.nanoTime() - startNanos) / 1e9;
+            if (sink != null) {
+                long t0 = System.nanoTime();
+                sink.write(pending, 0, emit);
+                sinkNanos += System.nanoTime() - t0;
+            }
+            wav.append(FloatBuffer.wrap(pending, 0, emit), emit);
+            System.arraycopy(pending, emit, pending, 0, TAIL_SAMPLES);
+            pendingCount = TAIL_SAMPLES;
+        }
+
+        void finish() throws Exception {
+            flushChunk();
+            if (pendingCount < TAIL_SAMPLES) throw new IOException("声音解码器返回的长度不足");
+            emitAvailable();
+            if (pendingCount != TAIL_SAMPLES) throw new IOException("声音解码器返回的长度不足");
+            pendingCount = 0; // 丢弃段尾 100 ms
+            close();
+        }
+
+        long sinkNanos() { return sinkNanos; }
+        double firstChunkSeconds() { return firstChunkSeconds; }
+        public void close() {
+            if (closed) return; closed = true;
+            state.close();
         }
     }
 

@@ -44,9 +44,36 @@ android/
 
 - 支持导入本地模型、选择参考音色、从参考录音和准确转写创建音色、停止任务和保存结果。
 - 输出 **24 kHz、单声道 PCM16 WAV**；默认 CPU FP32、4 线程，可选 1–8 线程。
-- 长文本按段生成，但**整个任务结束后才播放，不是流式播放**。输入上限 2000 字，每段最多 500 帧（约 40 秒）。
-- 当前固定 `lang="Chinese"`、`speaker=None`，口音和 caption 为空；**未提供 Python 版的 `speaker_id=1` 精品说话人入口，也未开放六语言/两方言选择**。
+- 长文本按段生成，生成中通过 `AudioTrack` **边解码边播放**；整段完成后仍可回放/保存 WAV。输入上限 2000 字，每段最多 500 帧（约 40 秒）。
+- 支持 **六语言选择**（Chinese / English / German / French / Japanese / Korean）；`speaker=None`，口音和 caption 为空；**方言（粤语/四川话）在 ONNX 入口不暴露**，Android 端同样没有。
 - 这是单 `app` 模块示例工程，不是独立 AAR/Android SDK；没有自建 C++/JNI/CMake，native 推理库来自 ONNX Runtime AAR。
+
+## 性能观测（本仓库新增）
+
+生成页底部新增「性能指标」面板，每次生成后显示：
+
+| 指标 | 含义 |
+|---|---|
+| 首块延迟 | 引擎开始处理 → 第一块可播放 PCM 就绪（含参考音色 prime、首 4 帧生成与解码） |
+| 生成耗时 | 纯生成/解码耗时，**不含** AudioTrack 写入阻塞 |
+| 音频时长 | 本次生成的 24 kHz 单声道音频长度 |
+| RTF | 生成耗时 ÷ 音频时长，越小越快 |
+| 实时倍数 | 音频时长 ÷ 生成耗时，>1 表示生成快于播放 |
+| 峰值内存 | 生成期间采样的 PSS 峰值 |
+
+同时每请求向 logcat 打一行结构化汇总，便于脱离界面核对：
+
+```bash
+adb logcat -s M5Perf
+# [M5_LOAD] threads=4 load_ms=...
+# [M5_TTFA] first_chunk_ms=...
+# [M5_SEG] index=1/2 frames=... audio_ms=... gen_ms=... rtf=...
+# [M5_PERF] lang=Chinese threads=4 chars=... segments=... audio_ms=... gen_ms=... wall_ms=... rtf=... realtime=... first_chunk_ms=... load_ms=... peak_pss_mib=... streaming=true tn=true
+```
+
+- `gen_ms` 扣除了 `AudioTrack.write` 的阻塞时间，`wall_ms` 是请求总墙钟；手机生成慢、播放缓冲满时两者会拉开差距；
+- 若设备不支持 24 kHz `AudioTrack`，会自动退回整段生成（`streaming=false`，首块延迟显示「未流式」）；
+- TN 目前只覆盖中文/英文；选日/韩/德/法时自动跳过 TN，原文直接送模型。
 
 ## 1. 构建环境
 
