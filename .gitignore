@@ -16,3 +16,8 @@ sym_shape_infer_temp.onnx
 
 # 救援镜像与 DTB 大文件不入库（见 rknn/RESCUE_W82.md）
 rknn/dtb_backup/
+
+# iOS：框架本体与 Xcode 用户状态不入库
+ios/frameworks/
+*.xcuserstate
+ios/M5Demo.xcodeproj/xcuserdata/

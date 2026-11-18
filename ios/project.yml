@@ -1,0 +1,34 @@
+name: M5Demo
+options:
+  bundleIdPrefix: com.aigump
+  deploymentTarget:
+    iOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+    CODE_SIGN_IDENTITY: ""
+    CODE_SIGNING_REQUIRED: "NO"
+    CODE_SIGNING_ALLOWED: "NO"
+targets:
+  M5Demo:
+    type: application
+    platform: iOS
+    sources: [sources]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aigump.m5demo
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UIFileSharingEnabled: YES
+        INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace: YES
+        SWIFT_OBJC_BRIDGING_HEADER: sources/BridgingHeader.h
+        OTHER_LDFLAGS: "-lc++"
+    dependencies:
+      - framework: frameworks/onnxruntime.xcframework
+        embed: true
+        optional: true
+schemes:
+  M5Demo:
+    build:
+      targets: { M5Demo: all }

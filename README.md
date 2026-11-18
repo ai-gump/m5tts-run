@@ -22,7 +22,8 @@ m5tts-run/
 │       └── src/
 │           ├── framework/codecs/qwen3_audio_tokenizer_decoder.cpp
 │           └── models/m5_tts/{ar.cpp, session.cpp}
-├── android/                 # 完整安卓工程（上游 M5-TTS/android 原样，含 Gradle wrapper / 打包工具 / TN 规则）
+├── android/                 # 完整安卓工程（上游基线 + 六语言/流式/性能面板二开）
+├── ios/                     # iOS demo（xcodegen 工程；快照/首块1帧/8帧块对齐安卓终局版）
 ├── web/                     # 自建：流式播放测试台
 │   ├── tts-test.html        #   单页测试台（GPU/CPU 双后端、语速三档、六项指标）
 │   ├── proxy.py             #   同源代理（页面 + /api 路由到 gpu:8090 / cpu:8092）
