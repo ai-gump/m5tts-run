@@ -13,3 +13,6 @@ __pycache__/
 # 量化工具落在根目录的临时产物
 *.data
 sym_shape_infer_temp.onnx
+
+# 救援镜像与 DTB 大文件不入库（见 rknn/RESCUE_W82.md）
+rknn/dtb_backup/
